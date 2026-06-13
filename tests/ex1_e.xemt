@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<!-- date/time : 2026/06/13 23:58:29 -->
+<EMT>
+   <Version no="2025"/>
+   <Material>
+      <mat no="1" name="air(incompressible/20C)"/>
+      <mat no="2" name="iron(Fe)(300K)"/>
+   </Material>
+   <Parts>
+      <fluid no="1" name="Domain(cuboid)" mat="1"/>
+      <part no="1" name="Domain(cuboid)" mat="1"/>
+      <part no="2" name="Iron" mat="2"/>
+   </Parts>
+</EMT>
