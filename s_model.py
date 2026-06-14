@@ -21,7 +21,7 @@ class SdatPart:
     material_id: int
     fraction: float
     name: str
-    box: Optional[tuple[int, int, int, int, int, int]] = None  # i1,i2,j1,j2,k1,k2 1-based
+    boxes: list[tuple[int, int, int, int, int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -152,8 +152,11 @@ def parse_sdat(text: str) -> SdatModel:
             i += 1
             while i < len(lines):
                 sub = lines[i].strip()
-                if sub in ("REGION", "/", "") or sub.startswith("REGION"):
+                if sub in ("REGION", "") or sub.startswith("REGION"):
                     break
+                if sub == "/":
+                    i += 1
+                    continue
                 if sub.startswith("!"):
                     i += 1
                     continue
@@ -162,7 +165,7 @@ def parse_sdat(text: str) -> SdatModel:
                 except ValueError:
                     box_vals = []
                 if len(box_vals) == 6 and model.parts:
-                    model.parts[-1].box = tuple(box_vals)
+                    model.parts[-1].boxes.append(tuple(box_vals))
                     i += 1
                     continue
                 m = re.match(r"^\s*(\d+)\s+(\d+)\s+([\d.eE+-]+)\s+(.*)$", sub)
@@ -241,11 +244,14 @@ def parse_sdat(text: str) -> SdatModel:
                     i += 1
             continue
 
-        m = re.match(r"^\s*(\d+)\s+(\d+)\s+(\d+)", line)
+        m = re.match(r"^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s|$)", line)
         if m:
             ni, nj, nk = int(m.group(1)), int(m.group(2)), int(m.group(3))
             if ni > 1 and nj > 1 and nk > 1:
-                model.ni, model.nj, model.nk = ni, nj, nk
+                prod = ni * nj * nk
+                cur = model.ni * model.nj * model.nk
+                if cur == 0 or prod > cur:
+                    model.ni, model.nj, model.nk = ni, nj, nk
         i += 1
 
     return model
@@ -307,7 +313,7 @@ def summarize_sdat(model: SdatModel) -> dict[str, Any]:
         "mesh_file": model.mesh_file,
         "title": model.title,
         "dims": (model.ni, model.nj, model.nk),
-        "parts": [(p.name, p.material_id, p.box) for p in model.parts],
+        "parts": [(p.name, p.material_id, p.boxes) for p in model.parts],
         "init": [(x.variable, x.value, x.region) for x in model.init_regions],
         "flux": [(x.kind, x.region) for x in model.flux_regions],
         "cxyz_lens": [len(a) for a in model.cxyz],

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Build scFLOW structured hex mesh from SDAT (.s) CXYZ spacing and PARTS iron box.
+Build scFLOW structured hex mesh from SDAT (.s) CXYZ spacing and PARTS boxes.
 
-Uses multi-material interface node duplication (hanging nodes) matching vendor layout.
+Supports multiple solid parts with multiple box regions per part and material IDs 1–7.
+Uses multi-material interface node duplication (one vertex per material at each node).
 """
 
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ import numpy as np
 
 from s_model import SdatModel, build_structured_coords
 
-# MPI partition split along I (matches vendor ex1_e layout).
+# MPI partition split along I (vendor layout for ex1/ex4).
 _I_SPLIT = 30
 
 _CORNER_OFFSETS = [
@@ -26,6 +27,8 @@ class BuiltMesh:
     vertices: np.ndarray
     cell_conn: np.ndarray
     material: np.ndarray
+    cell_part: np.ndarray
+    part_names: list[str]
     node_map: dict[tuple[int, int, int], list[int]]
     ni: int
     nj: int
@@ -35,82 +38,106 @@ class BuiltMesh:
     volume_names: list[str]
 
 
-def _iron_box(model: SdatModel) -> Optional[tuple[int, int, int, int, int, int]]:
-    """Return iron PARTS box as (i1, i2, j1, j2, k1, k2) 1-based node indices."""
-    for part in model.parts:
-        if part.box and part.material_id != 1:
-            return part.box
-    for part in reversed(model.parts):
-        if part.box:
-            return part.box
-    return None
+def _cell_corners(i: int, j: int, k: int) -> list[tuple[int, int, int]]:
+    return [
+        (i, j, k), (i + 1, j, k), (i + 1, j + 1, k), (i, j + 1, k),
+        (i, j, k + 1), (i + 1, j, k + 1), (i + 1, j + 1, k + 1), (i, j + 1, k + 1),
+    ]
 
 
-def _cell_material(
+def _cell_in_box(
     i: int, j: int, k: int,
     x: np.ndarray, y: np.ndarray, z: np.ndarray,
     box: tuple[int, int, int, int, int, int],
-) -> int:
-    """Iron (2) when all eight cell corners lie inside the PARTS node box."""
+) -> bool:
+    """True when all eight cell corners lie inside the PARTS node box."""
     i1, i2, j1, j2, k1, k2 = box
     xmin, xmax = x[i1 - 1], x[i2]
     ymin, ymax = y[j1 - 1], y[j2]
     zmin, zmax = z[k1 - 1], z[k2]
-    corners = [
-        (i, j, k), (i + 1, j, k), (i + 1, j + 1, k), (i, j + 1, k),
-        (i, j, k + 1), (i + 1, j, k + 1), (i + 1, j + 1, k + 1), (i, j + 1, k + 1),
-    ]
-    inside = all(
-        xmin <= x[ci] <= xmax and ymin <= y[cj] <= ymax and zmin <= z[ck] <= zmax
-        for ci, cj, ck in corners
-    )
-    return 2 if inside else 1
+    for ci, cj, ck in _cell_corners(i, j, k):
+        if not (xmin <= x[ci] <= xmax and ymin <= y[cj] <= ymax and zmin <= z[ck] <= zmax):
+            return False
+    return True
 
 
-def _needs_dup(i: int, j: int, k: int, cmat: np.ndarray) -> bool:
+def _build_cell_parts_and_materials(
+    model: SdatModel,
+    x: np.ndarray, y: np.ndarray, z: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign per-cell part id (PARTS order) and material id from box regions."""
+    ni, nj, nk = model.ni, model.nj, model.nk
+    cpart = np.ones((ni, nj, nk), dtype=np.int64)
+    cmat = np.ones((ni, nj, nk), dtype=np.int64)
+    for part in model.parts:
+        if not part.boxes:
+            continue
+        for box in part.boxes:
+            i1, i2, j1, j2, k1, k2 = box
+            i_lo = max(0, i1 - 1)
+            i_hi = min(ni, i2)
+            j_lo = max(0, j1 - 1)
+            j_hi = min(nj, j2)
+            k_lo = max(0, k1 - 1)
+            k_hi = min(nk, k2)
+            for k in range(k_lo, k_hi):
+                for j in range(j_lo, j_hi):
+                    for i in range(i_lo, i_hi):
+                        if _cell_in_box(i, j, k, x, y, z, box):
+                            cpart[i, j, k] = part.part_id
+                            cmat[i, j, k] = part.material_id
+    return cpart, cmat
+
+
+def _materials_at_node(
+    i: int, j: int, k: int,
+    cmat: np.ndarray,
+) -> list[int]:
+    """Sorted material ids of all cells sharing this structured node."""
     mats: set[int] = set()
+    ni, nj, nk = cmat.shape
     for di in (-1, 0):
         for dj in (-1, 0):
             for dk in (-1, 0):
                 ci, cj, ck = i + di, j + dj, k + dk
-                if 0 <= ci < cmat.shape[0] and 0 <= cj < cmat.shape[1] and 0 <= ck < cmat.shape[2]:
+                if 0 <= ci < ni and 0 <= cj < nj and 0 <= ck < nk:
                     mats.add(int(cmat[ci, cj, ck]))
-    return len(mats) > 1
+    return sorted(mats)
 
 
 def _assign_node_ids(
-    nx: int, ny: int, nz: int, cmat: np.ndarray,
-) -> dict[tuple[int, int, int], list[int]]:
+    nx: int, ny: int, nz: int,
+    cmat: np.ndarray,
+) -> tuple[dict[tuple[int, int, int], list[int]], dict[tuple[int, int, int], dict[int, int]]]:
+    """Assign node ids with one vertex per material at multi-material interfaces."""
     node_ids: dict[tuple[int, int, int], list[int]] = {}
+    mat_index: dict[tuple[int, int, int], dict[int, int]] = {}
     next_id = 1
     for k in range(nz):
         for j in range(ny):
             for i in range(_I_SPLIT):
-                node_ids[(i, j, k)] = [next_id]
-                next_id += 1
-                if _needs_dup(i, j, k, cmat):
-                    node_ids[(i, j, k)].append(next_id)
-                    next_id += 1
-    for k in range(nz):
-        for j in range(ny):
+                mats = _materials_at_node(i, j, k, cmat)
+                ids = [next_id + j for j in range(len(mats))]
+                next_id += len(mats)
+                node_ids[(i, j, k)] = ids
+                mat_index[(i, j, k)] = {m: idx for idx, m in enumerate(mats)}
             for i in range(_I_SPLIT, nx):
-                node_ids[(i, j, k)] = [next_id]
-                next_id += 1
-                if _needs_dup(i, j, k, cmat):
-                    node_ids[(i, j, k)].append(next_id)
-                    next_id += 1
-    return node_ids
+                mats = _materials_at_node(i, j, k, cmat)
+                ids = [next_id + j for j in range(len(mats))]
+                next_id += len(mats)
+                node_ids[(i, j, k)] = ids
+                mat_index[(i, j, k)] = {m: idx for idx, m in enumerate(mats)}
+    return node_ids, mat_index
 
 
 def _pick_node(
     i: int, j: int, k: int,
     cell_m: int,
     node_ids: dict[tuple[int, int, int], list[int]],
+    mat_index: dict[tuple[int, int, int], dict[int, int]],
 ) -> int:
-    ids = node_ids[(i, j, k)]
-    if len(ids) == 2 and cell_m == 2:
-        return ids[1]
-    return ids[0]
+    idx = mat_index[(i, j, k)][cell_m]
+    return node_ids[(i, j, k)][idx]
 
 
 def _build_vertices(
@@ -130,6 +157,7 @@ def _build_cell_conn(
     ni: int, nj: int, nk: int,
     cmat: np.ndarray,
     node_ids: dict[tuple[int, int, int], list[int]],
+    mat_index: dict[tuple[int, int, int], dict[int, int]],
 ) -> np.ndarray:
     rows: list[list[int]] = []
     for k in range(nk):
@@ -137,7 +165,7 @@ def _build_cell_conn(
             for i in range(ni):
                 m = int(cmat[i, j, k])
                 row = [
-                    _pick_node(i + oi, j + oj, k + ok, m, node_ids)
+                    _pick_node(i + oi, j + oj, k + ok, m, node_ids, mat_index)
                     for oi, oj, ok in _CORNER_OFFSETS
                 ]
                 rows.append(row)
@@ -146,9 +174,10 @@ def _build_cell_conn(
 
 def _face_quad(
     ci: int, cj: int, ck: int, axis: str, side: int,
-    cmat: np.ndarray, node_ids: dict[tuple[int, int, int], list[int]],
+    cmat: np.ndarray,
+    node_ids: dict[tuple[int, int, int], list[int]],
+    mat_index: dict[tuple[int, int, int], dict[int, int]],
 ) -> tuple[int, int, int, int]:
-    """Quad on cell (ci,cj,ck) boundary; side 0=low, 1=high along axis."""
     m = int(cmat[ci, cj, ck])
     if axis == "x":
         if side == 0:
@@ -165,13 +194,14 @@ def _face_quad(
             pts = [(ci, cj, ck), (ci + 1, cj, ck), (ci + 1, cj + 1, ck), (ci, cj + 1, ck)]
         else:
             pts = [(ci, cj, ck + 1), (ci, cj + 1, ck + 1), (ci + 1, cj + 1, ck + 1), (ci + 1, cj, ck + 1)]
-    return tuple(_pick_node(i, j, k, m, node_ids) for i, j, k in pts)
+    return tuple(_pick_node(i, j, k, m, node_ids, mat_index) for i, j, k in pts)
 
 
 def _build_boundary_faces(
     ni: int, nj: int, nk: int,
     cmat: np.ndarray,
     node_ids: dict[tuple[int, int, int], list[int]],
+    mat_index: dict[tuple[int, int, int], dict[int, int]],
     region_names: list[str],
 ) -> tuple[list[tuple[int, int, int, int]], list[tuple[str, int, int]]]:
     faces: list[tuple[int, int, int, int]] = []
@@ -183,12 +213,12 @@ def _build_boundary_faces(
         bc_plan.append((name, len(faces), len(quads)))
         faces.extend(quads)
 
-    xmin = [_face_quad(0, j, k, "x", 0, cmat, node_ids) for k in range(nk) for j in range(nj)]
-    xmax = [_face_quad(ni - 1, j, k, "x", 1, cmat, node_ids) for k in range(nk) for j in range(nj)]
-    ymin = [_face_quad(i, 0, k, "y", 0, cmat, node_ids) for k in range(nk) for i in range(ni)]
-    ymax = [_face_quad(i, nj - 1, k, "y", 1, cmat, node_ids) for k in range(nk) for i in range(ni)]
-    zmin = [_face_quad(i, j, 0, "z", 0, cmat, node_ids) for j in range(nj) for i in range(ni)]
-    zmax = [_face_quad(i, j, nk - 1, "z", 1, cmat, node_ids) for j in range(nj) for i in range(ni)]
+    xmin = [_face_quad(0, j, k, "x", 0, cmat, node_ids, mat_index) for k in range(nk) for j in range(nj)]
+    xmax = [_face_quad(ni - 1, j, k, "x", 1, cmat, node_ids, mat_index) for k in range(nk) for j in range(nj)]
+    ymin = [_face_quad(i, 0, k, "y", 0, cmat, node_ids, mat_index) for k in range(nk) for i in range(ni)]
+    ymax = [_face_quad(i, nj - 1, k, "y", 1, cmat, node_ids, mat_index) for k in range(nk) for i in range(ni)]
+    zmin = [_face_quad(i, j, 0, "z", 0, cmat, node_ids, mat_index) for j in range(nj) for i in range(ni)]
+    zmax = [_face_quad(i, j, nk - 1, "z", 1, cmat, node_ids, mat_index) for j in range(nj) for i in range(ni)]
 
     name_map = {
         "Xmin": xmin, "Xmax": xmax, "Ymin": ymin, "Ymax": ymax, "Zmin": zmin, "Zmax": zmax,
@@ -201,19 +231,18 @@ def _build_boundary_faces(
                 break
         add_group(name, quads)
 
-    # Fluid–solid interface (mat1/mat2).
     iface: list[tuple[int, int, int, int]] = []
     for k in range(nk):
         for j in range(nj):
             for i in range(ni - 1):
                 if cmat[i, j, k] != cmat[i + 1, j, k]:
-                    iface.append(_face_quad(i, j, k, "x", 1, cmat, node_ids))
+                    iface.append(_face_quad(i, j, k, "x", 1, cmat, node_ids, mat_index))
             for i in range(ni):
                 if j < nj - 1 and cmat[i, j, k] != cmat[i, j + 1, k]:
-                    iface.append(_face_quad(i, j, k, "y", 1, cmat, node_ids))
+                    iface.append(_face_quad(i, j, k, "y", 1, cmat, node_ids, mat_index))
             for i in range(ni):
                 if k < nk - 1 and cmat[i, j, k] != cmat[i, j, k + 1]:
-                    iface.append(_face_quad(i, j, k, "z", 1, cmat, node_ids))
+                    iface.append(_face_quad(i, j, k, "z", 1, cmat, node_ids, mat_index))
     add_group("INTERFACE", iface)
 
     return faces, bc_plan
@@ -228,29 +257,30 @@ def build_mesh_from_sdat(
     ni, nj, nk = model.ni, model.nj, model.nk
     if ni <= 0 or nj <= 0 or nk <= 0:
         raise ValueError("SDAT model missing mesh dimensions (ni, nj, nk)")
-    box = _iron_box(model)
-    if box is None:
-        raise ValueError("No PARTS box found in .s for solid region")
 
-    cmat = np.zeros((ni, nj, nk), dtype=np.int64)
-    for k in range(nk):
-        for j in range(nj):
-            for i in range(ni):
-                cmat[i, j, k] = _cell_material(i, j, k, x, y, z, box)
+    solid_boxes = sum(len(p.boxes) for p in model.parts)
+    if solid_boxes == 0:
+        raise ValueError("No PARTS box regions found in .s for solid parts")
 
-    node_ids = _assign_node_ids(len(x), len(y), len(z), cmat)
-    vertices = _build_vertices(x, y, z, node_ids)
-    cell_conn = _build_cell_conn(ni, nj, nk, cmat, node_ids)
-    material = cmat.reshape(-1)
-    faces, bc_plan = _build_boundary_faces(ni, nj, nk, cmat, node_ids, model.region_names)
-
+    part_names = [p.name for p in model.parts]
     if volume_names is None:
-        volume_names = ["PARTS1", "PARTS2", "Domain(cuboid)", "Iron"]
+        from xemt_model import volume_names_from_parts
+        volume_names = volume_names_from_parts(part_names)
+
+    cpart, cmat = _build_cell_parts_and_materials(model, x, y, z)
+    node_ids, mat_index = _assign_node_ids(len(x), len(y), len(z), cmat)
+    vertices = _build_vertices(x, y, z, node_ids)
+    cell_conn = _build_cell_conn(ni, nj, nk, cmat, node_ids, mat_index)
+    material = cmat.reshape(-1)
+    cell_part = cpart.reshape(-1)
+    faces, bc_plan = _build_boundary_faces(ni, nj, nk, cmat, node_ids, mat_index, model.region_names)
 
     return BuiltMesh(
         vertices=vertices,
         cell_conn=cell_conn,
         material=material,
+        cell_part=cell_part,
+        part_names=part_names,
         node_map=node_ids,
         ni=ni,
         nj=nj,
@@ -268,6 +298,8 @@ def mesh_to_fld_dict(built: BuiltMesh, fields: dict[str, np.ndarray]) -> dict:
         "n_vertices": int(built.vertices.shape[0]),
         "cell_conn": built.cell_conn,
         "material": built.material,
+        "cell_part": built.cell_part,
+        "part_names": built.part_names,
         "n_cells": int(built.cell_conn.shape[0]),
         "faces": built.faces,
         "bc_plan": built.bc_plan,

@@ -11,3 +11,6 @@ box.cgns
 *.swp
 *.swo
 .DS_Store
+
+*.cgns
+*.fld

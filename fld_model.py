@@ -128,13 +128,17 @@ def _parse_hex_cells(data: bytes) -> tuple[Optional[np.ndarray], Optional[np.nda
         return None, None
     mat_blocks = list(iter_data_blocks(data, sec_mat, section_end(data, sec_mat)))
     elem_blocks = list(iter_data_blocks(data, sec_elem, section_end(data, sec_elem)))
-    if not mat_blocks or len(elem_blocks) < 2:
+    if not mat_blocks or not elem_blocks:
         return None, None
     mat = np.frombuffer(
         data, dtype=">i4", count=mat_blocks[0][1] // 4, offset=mat_blocks[0][0],
     ).astype(np.int64).copy()
+    n_cells = mat.size
+    conn_p, conn_bc = max(elem_blocks, key=lambda b: b[1])
+    if conn_bc != n_cells * 32:
+        return None, None
     conn = np.frombuffer(
-        data, dtype=">i4", count=elem_blocks[1][1] // 4, offset=elem_blocks[1][0],
+        data, dtype=">i4", count=conn_bc // 4, offset=conn_p,
     ).astype(np.int64).copy()
     if conn.size % 8 != 0:
         return None, None

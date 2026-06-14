@@ -14,7 +14,7 @@ from fld_model import parse_fld
 from fld_writer import compose_fld, default_initial_fields, patch_cycle, write_fld_from_mesh
 from mesh_builder import build_mesh_from_sdat, mesh_to_fld_dict
 from s_model import parse_sdat_file, summarize_sdat, vertex_temperature_field
-from xemt_model import parse_xemt_file, volume_labels
+from xemt_model import parse_xemt_file, volume_names_for_sdat
 
 
 def _resolve_template(s_path: Path, template: str | None, mesh: str | None) -> Path:
@@ -63,7 +63,7 @@ def convert_s_to_fld(
 
     if xemt_path:
         xemt = parse_xemt_file(xemt_path)
-        vol_names = list(volume_labels(xemt))
+        vol_names = volume_names_for_sdat([p.name for p in model.parts])
         built = build_mesh_from_sdat(model, volume_names=vol_names)
         temp = vertex_temperature_field(
             model,

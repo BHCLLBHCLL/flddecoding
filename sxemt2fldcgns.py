@@ -15,7 +15,7 @@ from fld_model import parse_fld
 from fld_writer import default_initial_fields, write_fld_from_mesh
 from mesh_builder import build_mesh_from_sdat, mesh_to_fld_dict
 from s_model import parse_sdat_file, vertex_temperature_field
-from xemt_model import parse_xemt_file, volume_labels
+from xemt_model import parse_xemt_file, volume_names_for_sdat
 
 
 def convert(
@@ -28,7 +28,7 @@ def convert(
     xemt_file = Path(xemt_path)
     model = parse_sdat_file(str(s_file))
     xemt = parse_xemt_file(str(xemt_file))
-    vol_names = list(volume_labels(xemt))
+    vol_names = volume_names_for_sdat([p.name for p in model.parts])
 
     built = build_mesh_from_sdat(model, volume_names=vol_names)
     temp = vertex_temperature_field(
@@ -108,6 +108,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_parse:
         m = parse_fld(fld_out)
         print(f"Parse check: {m['n_vertices']} verts, {m['n_cells']} cells, fields={sorted(m['fields'].keys())}")
+
+    xemt = parse_xemt_file(str(xemt_path))
+    if xemt.groups:
+        for grp in xemt.groups:
+            print(f"Part group: {grp.name} ({len(grp.parts)} parts)")
 
     return 0
 

@@ -168,6 +168,8 @@ def write_cgns(mesh: dict, outpath: str, zone_name: str = "FluidZone") -> None:
     faces = mesh["faces"]
     bc_plan = mesh["bc_plan"]
     fields = mesh.get("fields", {})
+    cell_part = mesh.get("cell_part")
+    part_names = mesh.get("part_names", [])
 
     if vertices is None or cell_conn is None or material is None:
         raise ValueError("Incomplete mesh data")
@@ -177,11 +179,31 @@ def write_cgns(mesh: dict, outpath: str, zone_name: str = "FluidZone") -> None:
     n_vertex = int(vertices.shape[0])
     n_cells = int(cell_conn.shape[0])
 
-    parts1, parts2, domain_name, iron_name = _volume_element_names(
-        mesh.get("volume_names", []), material,
-    )
-    cells_m1 = cell_conn[material == 1]
-    cells_m2 = cell_conn[material == 2]
+    element_sections: list[tuple[str, np.ndarray]] = []
+    if cell_part is not None and part_names:
+        n_parts = len(part_names)
+        for pid in range(1, n_parts + 1):
+            mask = cell_part == pid
+            if np.any(mask):
+                element_sections.append((f"PARTS{pid}", cell_conn[mask]))
+        for pid, pname in enumerate(part_names, start=1):
+            mask = cell_part == pid
+            if np.any(mask):
+                element_sections.append((pname, cell_conn[mask]))
+    else:
+        parts1, parts2, domain_name, iron_name = _volume_element_names(
+            mesh.get("volume_names", []), material,
+        )
+        cells_m1 = cell_conn[material == 1]
+        cells_m2 = cell_conn[material == 2]
+        for label, cells in [
+            (parts1, cells_m1),
+            (parts2, cells_m2),
+            (domain_name, cells_m1),
+            (iron_name, cells_m2),
+        ]:
+            if cells.shape[0] > 0:
+                element_sections.append((label, cells))
 
     with h5py.File(outpath, "w", libver=("earliest", "v108")) as f:
         f.attrs.create("label", np.bytes_("Root Node of HDF5 File"),
@@ -217,14 +239,7 @@ def write_cgns(mesh: dict, outpath: str, zone_name: str = "FluidZone") -> None:
 
         elem_next = 1
         used_elem_names: set[str] = set()
-        for label, cells in [
-            (parts1, cells_m1),
-            (parts2, cells_m2),
-            (domain_name, cells_m1),
-            (iron_name, cells_m2),
-        ]:
-            if cells.shape[0] == 0:
-                continue
+        for label, cells in element_sections:
             name = _unique_cgns_name(label, used_elem_names)
             elem_next = _write_hex_elements(zone, name, cells, elem_next)
 
