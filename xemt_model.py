@@ -39,12 +39,20 @@ def parse_xemt(path: str) -> XemtModel:
     if fluid is not None:
         model.fluid_name = fluid.attrib.get("name", "")
         model.fluid_mat = int(fluid.attrib.get("mat", "1"))
-    for part in root.findall(".//Parts/part"):
+    for part in root.findall(".//part"):
         model.parts.append(
             XemtPart(
                 int(part.attrib["no"]),
                 part.attrib.get("name", ""),
                 int(part.attrib.get("mat", "1")),
+            )
+        )
+    for panel in root.findall(".//panel"):
+        model.parts.append(
+            XemtPart(
+                int(panel.attrib["no"]),
+                panel.attrib.get("name", ""),
+                int(panel.attrib.get("mat", "1")),
             )
         )
     return model
@@ -65,13 +73,20 @@ def part_material_map(model: XemtModel) -> dict[str, int]:
 
 
 def volume_labels(model: XemtModel) -> tuple[str, str, str, str]:
-    """PARTS1, PARTS2, domain label, iron label for CGNS element sections."""
+    """PARTS1, PARTS2, domain label, solid label for CGNS element sections."""
     domain = model.fluid_name or "Domain"
     solid = ""
     for p in model.parts:
-        if p.material_id != model.fluid_mat:
+        if p.material_id != model.fluid_mat and p.name != domain:
             solid = p.name
             break
     if not solid and model.parts:
-        solid = model.parts[0].name
-    return "PARTS1", "PARTS2", domain, solid or "Solid"
+        for p in model.parts:
+            if p.material_id != model.fluid_mat:
+                solid = p.name
+                break
+    if not solid:
+        solid = "PARTS2"
+    if solid == domain:
+        solid = "SOLID"
+    return "PARTS1", "PARTS2", domain, solid

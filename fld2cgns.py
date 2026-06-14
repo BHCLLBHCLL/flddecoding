@@ -103,19 +103,22 @@ def _write_face_elements(zone, faces: list[tuple[int, int, int, int]]) -> None:
 
 def _write_zone_bc(zone, bc_plan: list[tuple[str, int, int]]) -> None:
     zbc = _cgns_node(zone, "ZoneBC", "ZoneBC_t", "MT")
+    used_bc: set[str] = set()
     for bc_name, start_idx, count in bc_plan:
-        bc = _cgns_node(zbc, bc_name, "BC_t", "C1")
+        if count <= 0:
+            continue
+        name = _unique_cgns_name(bc_name, used_bc)
+        bc = _cgns_node(zbc, name, "BC_t", "C1")
         _bytes_dataset(bc, b"Null")
         gl = _cgns_node(bc, "GridLocation", "GridLocation_t", "C1")
         _bytes_dataset(gl, b"FaceCenter")
-        if count > 0:
-            pl = _cgns_node(bc, "PointList", "IndexArray_t", "I4")
-            ids = np.arange(
-                _FACE_ELEM_START + start_idx,
-                _FACE_ELEM_START + start_idx + count,
-                dtype=np.int32,
-            )
-            _i32_dataset(pl, ids)
+        pl = _cgns_node(bc, "PointList", "IndexArray_t", "I4")
+        ids = np.arange(
+            _FACE_ELEM_START + start_idx,
+            _FACE_ELEM_START + start_idx + count,
+            dtype=np.int32,
+        )
+        _i32_dataset(pl, ids)
 
 
 def _write_flow_solution(zone, fields: dict[str, np.ndarray]) -> None:
@@ -142,6 +145,20 @@ def _volume_element_names(volume_names: list[str], mat: np.ndarray) -> tuple[str
     elif len(volume_names) == 2:
         domain, iron = volume_names[0], volume_names[1]
     return parts1, parts2, domain, iron
+
+
+def _unique_cgns_name(name: str, used: set[str]) -> str:
+    """Return *name* unique within *used* (HDF5 group names)."""
+    base = name.strip() or "UNNAMED"
+    if base not in used:
+        used.add(base)
+        return base
+    n = 2
+    while f"{base}_{n}" in used:
+        n += 1
+    unique = f"{base}_{n}"
+    used.add(unique)
+    return unique
 
 
 def write_cgns(mesh: dict, outpath: str, zone_name: str = "FluidZone") -> None:
@@ -199,10 +216,17 @@ def write_cgns(mesh: dict, outpath: str, zone_name: str = "FluidZone") -> None:
         _write_grid_coordinates(zone, vertices)
 
         elem_next = 1
-        elem_next = _write_hex_elements(zone, parts1, cells_m1, elem_next)
-        elem_next = _write_hex_elements(zone, parts2, cells_m2, elem_next)
-        elem_next = _write_hex_elements(zone, domain_name, cells_m1, elem_next)
-        elem_next = _write_hex_elements(zone, iron_name, cells_m2, elem_next)
+        used_elem_names: set[str] = set()
+        for label, cells in [
+            (parts1, cells_m1),
+            (parts2, cells_m2),
+            (domain_name, cells_m1),
+            (iron_name, cells_m2),
+        ]:
+            if cells.shape[0] == 0:
+                continue
+            name = _unique_cgns_name(label, used_elem_names)
+            elem_next = _write_hex_elements(zone, name, cells, elem_next)
 
         # Empty NotRegistered section (matches vendor exporter).
         el = _cgns_node(zone, "NotRegistered", "Elements_t", "I4")

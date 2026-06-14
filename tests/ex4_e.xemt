@@ -1,0 +1,51 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<!-- date/time : 2023/10/31 20:25:31 -->
+<EMT>
+   <Version no="2023"/>
+   <Material>
+      <mat no="1" name="air(incompressible/20C)"/>
+      <mat no="2" name="soda_glass(300K)"/>
+      <mat no="3" name="epoxy_resin(300K)"/>
+      <mat no="4" name="silicon_resin(300K)"/>
+      <mat no="5" name="polyethylene_resin(300K)"/>
+      <mat no="6" name="polycarbonate_resin(273K)"/>
+      <mat no="7" name="diecast_magnesium(300K)"/>
+   </Material>
+   <Parts>
+      <fluid no="1" name="Domain(cuboid)" mat="1"/>
+      <part no="1" name="Domain(cuboid)" mat="1"/>
+      <group name="cellular_phone" expand="T">
+         <part no="2" name="lower_cover_01" mat="7"/>
+         <part no="3" name="lower_cover_02" mat="7"/>
+         <part no="4" name="upper_cover_01" mat="7"/>
+         <part no="5" name="upper_cover_02" mat="7"/>
+         <part no="6" name="button" mat="6"/>
+         <part no="7" name="battery" mat="6"/>
+         <part no="8" name="PCB_01" mat="3"/>
+         <part no="9" name="PCB_02" mat="3"/>
+         <part no="10" name="LCD_01" mat="2"/>
+         <part no="11" name="LCD_02" mat="2"/>
+         <part no="12" name="box_01" mat="5"/>
+         <part no="13" name="box_02" mat="5"/>
+         <part no="14" name="box_03" mat="5"/>
+         <part no="15" name="box_04" mat="5"/>
+         <part no="16" name="box_05" mat="5"/>
+         <part no="17" name="box_06" mat="5"/>
+         <part no="18" name="box_07" mat="5"/>
+         <part no="19" name="box_08" mat="5"/>
+         <part no="20" name="box_09" mat="5"/>
+         <part no="21" name="box_10" mat="5"/>
+         <part no="22" name="box_11" mat="5"/>
+         <part no="23" name="box_12" mat="5"/>
+         <part no="24" name="box_13" mat="5"/>
+         <part no="25" name="speaker" mat="5"/>
+         <part no="26" name="(cuboid)_IC_01" mat="4"/>
+         <part no="27" name="(cuboid)_IC_02" mat="4"/>
+         <part no="28" name="(cuboid)_IC_03" mat="4"/>
+         <part no="29" name="(cuboid)_U_01" mat="4"/>
+         <part no="30" name="(cuboid)_U_02" mat="4"/>
+         <part no="31" name="(cuboid)_U_03" mat="4"/>
+         <part no="32" name="(cuboid)_U_04" mat="4"/>
+      </group>
+   </Parts>
+</EMT>
