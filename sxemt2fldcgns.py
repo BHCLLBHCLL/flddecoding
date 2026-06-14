@@ -49,6 +49,7 @@ def convert(
         fields,
         s_text,
         built.volume_names,
+        surface_cats=built.surface_cats,
     )
 
     mesh_dict = mesh_to_fld_dict(built, fields)

@@ -207,7 +207,13 @@ def _build_face_list_and_bcs(
     if len(blocks) < 6:
         return [], []
 
-    meta1 = [read_i32_be(data, blocks[1][0] + i * 4) for i in range(15)]
+    meta1 = [
+        read_i32_be(data, blocks[1][0] + i * 4)
+        for i in range(min(18, blocks[1][1] // 4))
+    ]
+    while len(meta1) < 15:
+        meta1.append(0)
+
     arr3 = np.frombuffer(
         data, dtype=">i4", count=blocks[3][1] // 4, offset=blocks[3][0],
     )
@@ -218,10 +224,13 @@ def _build_face_list_and_bcs(
 
     c_entb, c_entf, c_mom, c_parts = meta1[2], meta1[3], meta1[7], meta1[10]
     c_xmax, c_xmin, c_ymax, c_surf = meta1[12], meta1[13], meta1[14], meta1[11]
+    c_ymin = meta1[15] if len(meta1) > 15 else 0
+    c_zmax = meta1[16] if len(meta1) > 16 else 0
+    c_zmin = meta1[17] if len(meta1) > 17 else 0
 
     off = 0
     slices: list[slice] = []
-    for c in [c_entb, c_entf, c_mom, c_parts, c_xmax, c_xmin, c_ymax, c_surf]:
+    for c in [c_entb, c_entf, c_mom, c_parts, c_xmax, c_xmin, c_ymax, c_surf, c_ymin, c_zmax, c_zmin]:
         slices.append(slice(off, off + c))
         off += c
 

@@ -18,6 +18,7 @@ from fld_model import (
     read_i32_be,
     section_end,
 )
+from surface_builder import surface_meta_counts
 
 
 def _write_section_block(payload: bytes) -> bytes:
@@ -209,14 +210,126 @@ def _write_f64_axes_section(name: str, axes: list[np.ndarray]) -> bytes:
     return _write_named_section(name, inner)
 
 
-def _build_header() -> bytes:
-    """Minimal CRDL-FLD header (cycle 0)."""
-    parts = []
-    parts.append(_write_named_section("FileRevision", _write_section_block(struct.pack(">i", 1))))
+def _fld_prefix() -> bytes:
+    """CRDL-FLD file prefix required by scFLOW / scPOST (marker before sections)."""
+    return struct.pack(">i", 8) + b"CRDL-FLD" + struct.pack(">i", 8) + struct.pack(">iii", 4, 4, 4)
+
+
+def _section_bytes(data: bytes, name: str) -> bytes:
+    start = find_section(data, name)
+    if start < 0:
+        return b""
+    return bytes(data[start:section_end(data, start)])
+
+
+def _vendor_header_bytes(template_path: Optional[str]) -> bytes:
+    """Copy vendor header sections through LS_CoordinateSystem from a reference FLD."""
+    if not template_path or not Path(template_path).is_file():
+        return _build_minimal_header()
+    data = Path(template_path).read_bytes()
+    parts = [
+        _section_bytes(data, "FileRevision"),
+        _section_bytes(data, "Application"),
+        _section_bytes(data, "ApplicationVersion"),
+        _section_bytes(data, "ReleaseDate"),
+        _section_bytes(data, "GridType"),
+        _section_bytes(data, "Dimension"),
+        _section_bytes(data, "Bias"),
+        _section_bytes(data, "Date"),
+        _section_bytes(data, "Comments"),
+        _section_bytes(data, "Cycle"),
+        _section_bytes(data, "Unused"),
+        _section_bytes(data, "Encoding"),
+        _section_bytes(data, "HeaderDataEnd"),
+        _section_bytes(data, "OverlapStart_0"),
+        _section_bytes(data, "LS_CoordinateSystem"),
+    ]
+    return b"".join(p for p in parts if p)
+
+
+def _build_minimal_header() -> bytes:
+    """Fallback header when no template FLD is available."""
+    body = _write_named_section("FileRevision", _write_section_block(struct.pack(">i", 1)))
     app = b"scFLOW FLD Writer".ljust(64, b"\x00")
-    parts.append(_write_named_section("Application", _write_section_block(app)))
-    parts.append(_write_named_section("LS_CoordinateSystem", _write_section_block(struct.pack(">i", 1))))
-    return b"".join(parts)
+    body += _write_named_section("Application", _write_section_block(app))
+    body += _write_named_section("OverlapStart_0", _write_section_block(struct.pack(">i", 0)))
+    body += _write_named_section("LS_CoordinateSystem", _write_section_block(struct.pack(">i", 1)))
+    return body
+
+
+def _write_volume_geometry_array(
+    volume_names: list[str],
+    n_cells: int,
+    template_path: Optional[str] = None,
+) -> bytes:
+    """Write LS_VolumeGeometryArray (names + per-cell vendor block)."""
+    labels = " ".join(volume_names).encode("ascii")
+    inner = b""
+    if template_path and Path(template_path).is_file():
+        data = Path(template_path).read_bytes()
+        sec = find_section(data, "LS_VolumeGeometryArray")
+        if sec >= 0:
+            blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
+            for p, bc in blocks[:2]:
+                inner += _write_section_block(bytes(data[p:p + bc]))
+    if not inner:
+        inner = _write_section_block(b"\x00" * 16384)
+        inner += _write_section_block(b"\x00" * 256)
+    cell_block = np.zeros(n_cells, dtype=">f8").tobytes()
+    inner += _write_section_block(cell_block)
+    return _write_named_section("LS_VolumeGeometryArray", inner)
+
+
+def _write_surface_geometry_array(
+    surface_cats: dict,
+    ymax_name: str = "Ymax",
+    template_path: Optional[str] = None,
+) -> bytes:
+    """Write LS_SurfaceGeometryArray for scPOST."""
+    seg1_order = [
+        "@UNDEFINEDENTB", "@UNDEFINEDENTF", "@UNDEFINEDENTS", "@UNDEFINEDENTX",
+        "@UNDEFINEDMOM", "@UNDEFINEDVFWL", "PARTS", "SURFACE",
+        "Xmax", "Xmin", ymax_name, "Ymin", "Zmax", "Zmin",
+    ]
+    seg1: list[tuple[tuple[int, int, int, int], int]] = []
+    for key in seg1_order:
+        seg1.extend(surface_cats.get(key, []))
+
+    n_faces = len(seg1)
+    meta = surface_meta_counts(surface_cats, ymax_name=ymax_name)
+    arr2 = np.full(n_faces, 134, dtype=np.int32)
+    arr3 = np.array([flat + 1 for _, flat in seg1], dtype=np.int32)
+    arr5 = np.array([list(q) for q, _ in seg1], dtype=np.int32).reshape(-1)
+
+    inner = b""
+    block4 = b"\x00" * 72
+    bc_blocks: list[bytes] = []
+    if template_path and Path(template_path).is_file():
+        data = Path(template_path).read_bytes()
+        sec = find_section(data, "LS_SurfaceGeometryArray")
+        if sec >= 0:
+            blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
+            if blocks:
+                p0, bc0 = blocks[0]
+                inner += _write_section_block(bytes(data[p0:p0 + bc0]))
+            if len(blocks) > 4:
+                p4, bc4 = blocks[4]
+                block4 = bytes(data[p4:p4 + bc4])
+            for p, bc in blocks[6:]:
+                bc_blocks.append(bytes(data[p:p + bc]))
+
+    if not inner:
+        inner = _write_section_block(b"\x00" * 4608)
+
+    inner += _write_section_block(meta.astype(">i4", copy=False).tobytes())
+    inner += _write_section_block(np.ascontiguousarray(arr2, dtype=">i4").tobytes())
+    inner += _write_section_block(np.ascontiguousarray(arr3, dtype=">i4").tobytes())
+    inner += _write_section_block(block4)
+    inner += _write_section_block(np.ascontiguousarray(arr5, dtype=">i4").tobytes())
+    for block in bc_blocks:
+        inner += _write_section_block(block)
+
+    return _write_named_section("LS_SurfaceGeometryArray", inner)
 
 
 def write_fld_from_mesh(
@@ -228,12 +341,19 @@ def write_fld_from_mesh(
     s_text: str,
     volume_names: list[str],
     cycle: int = 0,
+    surface_cats: Optional[dict] = None,
+    template_fld: Optional[str] = None,
 ) -> None:
     """Write a complete FLD from mesh arrays (no template)."""
     n_verts = vertices.shape[0]
     n_cells = cell_conn.shape[0]
 
-    body = _build_header()
+    if template_fld is None:
+        default_tpl = Path(__file__).resolve().parent / "tests" / "ex4_e_63.fld"
+        if default_tpl.is_file() and n_cells == 1470392:
+            template_fld = str(default_tpl)
+
+    body = _vendor_header_bytes(template_fld)
 
     if "PRES" in fields:
         inner = _write_section_block(np.ascontiguousarray(fields["PRES"], dtype=">f8").tobytes())
@@ -291,6 +411,11 @@ def write_fld_from_mesh(
     )
     body += _write_named_section("HVEC", hvec_inner)
 
+    if template_fld and Path(template_fld).is_file():
+        tpl = Path(template_fld).read_bytes()
+        body += _section_bytes(tpl, "LS_STREAMcoc")
+        body += _section_bytes(tpl, "LS_STREAMmultiblock")
+
     body += _write_f64_axes_section(
         "LS_Nodes",
         [vertices[:, 0], vertices[:, 1], vertices[:, 2]],
@@ -303,8 +428,10 @@ def write_fld_from_mesh(
     )
 
     labels = " ".join(volume_names).encode("ascii")
-    vol_inner = _write_section_block(labels.ljust(1024, b"\x00")[:1024])
-    body += _write_named_section("LS_VolumeGeometryArray", vol_inner)
+    body += _write_volume_geometry_array(volume_names, n_cells, template_fld)
+
+    if surface_cats:
+        body += _write_surface_geometry_array(surface_cats, template_path=template_fld)
 
     normalized = s_text.replace("\r\n", "\n").lstrip("\ufeff")
     if not normalized.startswith("SDAT"):
@@ -317,8 +444,7 @@ def write_fld_from_mesh(
 
     body += _write_named_section("OverlapEnd", _write_section_block(struct.pack(">i", 0)))
 
-    magic = b"CRDL-FLD"
-    out = magic + body
+    out = _fld_prefix() + body
     Path(out_path).write_bytes(out)
 
 

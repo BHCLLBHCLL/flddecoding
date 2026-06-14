@@ -11,6 +11,7 @@ from typing import Optional
 
 import numpy as np
 
+from surface_builder import build_vendor_surfaces, vendor_bc_plan_from_categories
 from s_model import SdatModel, build_structured_coords
 
 # MPI partition split along I (vendor layout for ex1/ex4).
@@ -36,6 +37,7 @@ class BuiltMesh:
     faces: list[tuple[int, int, int, int]]
     bc_plan: list[tuple[str, int, int]]
     volume_names: list[str]
+    surface_cats: dict
 
 
 def _cell_corners(i: int, j: int, k: int) -> list[tuple[int, int, int]]:
@@ -200,52 +202,24 @@ def _face_quad(
 def _build_boundary_faces(
     ni: int, nj: int, nk: int,
     cmat: np.ndarray,
+    cpart: np.ndarray,
     node_ids: dict[tuple[int, int, int], list[int]],
     mat_index: dict[tuple[int, int, int], dict[int, int]],
     region_names: list[str],
-) -> tuple[list[tuple[int, int, int, int]], list[tuple[str, int, int]]]:
-    faces: list[tuple[int, int, int, int]] = []
-    bc_plan: list[tuple[str, int, int]] = []
+    material_flat: np.ndarray,
+) -> tuple[list[tuple[int, int, int, int]], list[tuple[str, int, int]], dict]:
+    ymax_name = "Ymax"
+    for r in region_names:
+        if r.upper().startswith("Y") and "max" in r.lower():
+            ymax_name = r.split("!")[0].strip()
+            break
 
-    def add_group(name: str, quads: list[tuple[int, int, int, int]]) -> None:
-        if not quads:
-            return
-        bc_plan.append((name, len(faces), len(quads)))
-        faces.extend(quads)
-
-    xmin = [_face_quad(0, j, k, "x", 0, cmat, node_ids, mat_index) for k in range(nk) for j in range(nj)]
-    xmax = [_face_quad(ni - 1, j, k, "x", 1, cmat, node_ids, mat_index) for k in range(nk) for j in range(nj)]
-    ymin = [_face_quad(i, 0, k, "y", 0, cmat, node_ids, mat_index) for k in range(nk) for i in range(ni)]
-    ymax = [_face_quad(i, nj - 1, k, "y", 1, cmat, node_ids, mat_index) for k in range(nk) for i in range(ni)]
-    zmin = [_face_quad(i, j, 0, "z", 0, cmat, node_ids, mat_index) for j in range(nj) for i in range(ni)]
-    zmax = [_face_quad(i, j, nk - 1, "z", 1, cmat, node_ids, mat_index) for j in range(nj) for i in range(ni)]
-
-    name_map = {
-        "Xmin": xmin, "Xmax": xmax, "Ymin": ymin, "Ymax": ymax, "Zmin": zmin, "Zmax": zmax,
-    }
-    for default, quads in name_map.items():
-        name = default
-        for r in region_names:
-            if r.upper().startswith(default[0].upper()) or default.lower() in r.lower():
-                name = r.split("!")[0].strip()
-                break
-        add_group(name, quads)
-
-    iface: list[tuple[int, int, int, int]] = []
-    for k in range(nk):
-        for j in range(nj):
-            for i in range(ni - 1):
-                if cmat[i, j, k] != cmat[i + 1, j, k]:
-                    iface.append(_face_quad(i, j, k, "x", 1, cmat, node_ids, mat_index))
-            for i in range(ni):
-                if j < nj - 1 and cmat[i, j, k] != cmat[i, j + 1, k]:
-                    iface.append(_face_quad(i, j, k, "y", 1, cmat, node_ids, mat_index))
-            for i in range(ni):
-                if k < nk - 1 and cmat[i, j, k] != cmat[i, j, k + 1]:
-                    iface.append(_face_quad(i, j, k, "z", 1, cmat, node_ids, mat_index))
-    add_group("INTERFACE", iface)
-
-    return faces, bc_plan
+    _, cats = build_vendor_surfaces(
+        ni, nj, nk, cmat, cpart,
+        lambda ci, cj, ck, axis, side: _face_quad(ci, cj, ck, axis, side, cmat, node_ids, mat_index),
+    )
+    faces, bc_plan = vendor_bc_plan_from_categories(cats, material_flat, ymax_name=ymax_name)
+    return faces, bc_plan, cats
 
 
 def build_mesh_from_sdat(
@@ -273,7 +247,9 @@ def build_mesh_from_sdat(
     cell_conn = _build_cell_conn(ni, nj, nk, cmat, node_ids, mat_index)
     material = cmat.reshape(-1)
     cell_part = cpart.reshape(-1)
-    faces, bc_plan = _build_boundary_faces(ni, nj, nk, cmat, node_ids, mat_index, model.region_names)
+    faces, bc_plan, surface_cats = _build_boundary_faces(
+        ni, nj, nk, cmat, cpart, node_ids, mat_index, model.region_names, material,
+    )
 
     return BuiltMesh(
         vertices=vertices,
@@ -288,6 +264,7 @@ def build_mesh_from_sdat(
         faces=faces,
         bc_plan=bc_plan,
         volume_names=volume_names,
+        surface_cats=surface_cats,
     )
 
 
@@ -304,5 +281,6 @@ def mesh_to_fld_dict(built: BuiltMesh, fields: dict[str, np.ndarray]) -> dict:
         "faces": built.faces,
         "bc_plan": built.bc_plan,
         "volume_names": built.volume_names,
+        "surface_cats": built.surface_cats,
         "fields": fields,
     }

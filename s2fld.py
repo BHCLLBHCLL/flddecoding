@@ -81,6 +81,7 @@ def convert_s_to_fld(
             fields,
             s_text,
             built.volume_names,
+            surface_cats=built.surface_cats,
         )
         n_verts = built.vertices.shape[0]
         n_cells = built.cell_conn.shape[0]

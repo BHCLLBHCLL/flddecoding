@@ -24,8 +24,8 @@ except ImportError:
     print("Error: h5py is required. Install with: pip install h5py numpy")
     sys.exit(1)
 
-# NGON face elements start at this index (after volume element sections).
-_FACE_ELEM_START = 36481
+# NGON face elements start after volume element sections (set per mesh in write_cgns).
+_FACE_ELEM_START_DEFAULT = 36481
 # CGNS element type codes used in connectivity arrays.
 _HEX_TYPE = 17
 _QUAD_TYPE = 7
@@ -85,13 +85,13 @@ def _write_hex_elements(zone, name: str, cells: np.ndarray, elem_start: int) -> 
     return elem_start + n_cells
 
 
-def _write_face_elements(zone, faces: list[tuple[int, int, int, int]]) -> None:
+def _write_face_elements(zone, faces: list[tuple[int, int, int, int]], face_elem_start: int) -> None:
     el = _cgns_node(zone, "GridElements_Faces", "Elements_t", "I4")
     n_faces = len(faces)
     _i32_dataset(el, [_NGON_TYPE, n_faces])
 
     er = _cgns_node(el, "ElementRange", "IndexRange_t", "I4")
-    _i32_dataset(er, [_FACE_ELEM_START, _FACE_ELEM_START + n_faces - 1])
+    _i32_dataset(er, [face_elem_start, face_elem_start + n_faces - 1])
 
     conn: list[int] = []
     for face in faces:
@@ -101,7 +101,7 @@ def _write_face_elements(zone, faces: list[tuple[int, int, int, int]]) -> None:
     _i32_dataset(ec, conn)
 
 
-def _write_zone_bc(zone, bc_plan: list[tuple[str, int, int]]) -> None:
+def _write_zone_bc(zone, bc_plan: list[tuple[str, int, int]], face_elem_start: int) -> None:
     zbc = _cgns_node(zone, "ZoneBC", "ZoneBC_t", "MT")
     used_bc: set[str] = set()
     for bc_name, start_idx, count in bc_plan:
@@ -114,8 +114,8 @@ def _write_zone_bc(zone, bc_plan: list[tuple[str, int, int]]) -> None:
         _bytes_dataset(gl, b"FaceCenter")
         pl = _cgns_node(bc, "PointList", "IndexArray_t", "I4")
         ids = np.arange(
-            _FACE_ELEM_START + start_idx,
-            _FACE_ELEM_START + start_idx + count,
+            face_elem_start + start_idx,
+            face_elem_start + start_idx + count,
             dtype=np.int32,
         )
         _i32_dataset(pl, ids)
@@ -243,16 +243,17 @@ def write_cgns(mesh: dict, outpath: str, zone_name: str = "FluidZone") -> None:
             name = _unique_cgns_name(label, used_elem_names)
             elem_next = _write_hex_elements(zone, name, cells, elem_next)
 
+        face_elem_start = elem_next
         # Empty NotRegistered section (matches vendor exporter).
         el = _cgns_node(zone, "NotRegistered", "Elements_t", "I4")
         _i32_dataset(el, [_NGON_TYPE, 0])
         er = _cgns_node(el, "ElementRange", "IndexRange_t", "I4")
-        _i32_dataset(er, [_FACE_ELEM_START, _FACE_ELEM_START - 1])
+        _i32_dataset(er, [face_elem_start, face_elem_start - 1])
         ec = _cgns_node(el, "ElementConnectivity", "DataArray_t", "I4")
         _i32_dataset(ec, [])
 
-        _write_face_elements(zone, faces)
-        _write_zone_bc(zone, bc_plan)
+        _write_face_elements(zone, faces, face_elem_start)
+        _write_zone_bc(zone, bc_plan, face_elem_start)
         _write_flow_solution(zone, fields)
 
 

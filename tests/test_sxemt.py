@@ -21,8 +21,8 @@ def test_sxemt_pipeline() -> list[str]:
     errors: list[str] = []
     s_path = ROOT / "tests" / "ex1_e.s"
     xemt_path = ROOT / "tests" / "ex1_e.xemt"
-    fld_out = ROOT / "tests" / "ex1_e_from_sxemt.fld"
-    cgns_out = ROOT / "tests" / "ex1_e_from_sxemt.cgns"
+    fld_out = ROOT / "tests" / "ex1_e_from_sxemt_run.fld"
+    cgns_out = ROOT / "tests" / "ex1_e_from_sxemt_run.cgns"
 
     info = convert(str(s_path), str(xemt_path), str(fld_out), str(cgns_out))
 
