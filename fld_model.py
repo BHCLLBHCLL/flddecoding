@@ -381,6 +381,57 @@ def parse_fld(filepath: str) -> dict[str, Any]:
         return result
 
 
+def fld_cell_count(data: bytes) -> Optional[int]:
+    """Return number of cells from LS_MatOfElements, or None if missing."""
+    sec = find_section(data, "LS_MatOfElements")
+    if sec < 0:
+        return None
+    blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
+    if not blocks:
+        return None
+    return blocks[0][1] // 4
+
+
+def validate_scpost_geometry(data: bytes) -> list[str]:
+    """
+    Check geometry sections for known scPOST failure patterns.
+
+    Returns a list of human-readable issue strings (empty if OK).
+    """
+    issues: list[str] = []
+    n_cells = fld_cell_count(data)
+
+    for sec_name in ("LS_VolumeGeometryArray", "LS_SurfaceGeometryArray"):
+        sec = find_section(data, sec_name)
+        if sec < 0:
+            continue
+        inner = sec + 40
+        blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
+        if not blocks:
+            continue
+        pre_len = blocks[0][0] - inner - 8
+        if pre_len >= 108:
+            pre = data[inner:inner + pre_len]
+            at100 = read_i32_be(pre, 100)
+            if at100 != 1:
+                issues.append(
+                    f"{sec_name}: geometry preamble offset 100 is {at100}, expected 1 "
+                    "(first_block_bc must be patched at offset 104, not 100)"
+                )
+
+    vol_sec = find_section(data, "LS_VolumeGeometryArray")
+    if vol_sec >= 0 and n_cells is not None:
+        blocks = list(iter_data_blocks(data, vol_sec, section_end(data, vol_sec)))
+        if len(blocks) > 2:
+            p2, bc2 = blocks[2]
+            if bc2 == n_cells * 8 and not any(data[p2:p2 + bc2]):
+                issues.append(
+                    "LS_VolumeGeometryArray: per-cell block (block2) is all zeros; "
+                    "scPOST CreateVolFlag64 may hang during Relocating volumes"
+                )
+    return issues
+
+
 def describe_fld_sections(filepath: str) -> list[dict[str, Any]]:
     """Return a section layout summary for format inspection."""
     with open_fld_buffer(filepath) as data:

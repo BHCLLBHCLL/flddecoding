@@ -39,6 +39,12 @@ python sxemt2fldcgns.py tests/ex1_e.s tests/ex1_e.xemt
 # 或仅 FLD
 python s2fld.py tests/ex1_e.s --xemt tests/ex1_e.xemt -o tests/ex1_e_0.fld
 
+# 指定参考 FLD（scPOST 头/几何块）；未指定时按单元数自动匹配 tests/{stem}_63.fld 等
+python sxemt2fldcgns.py tests/ex4_e.s tests/ex4_e.xemt --template tests/ex4_e_63.fld
+
+# 检查 scPOST 几何节
+python fld_parser.py tests/ex4_e_from_sxemt.fld --validate-scpost
+
 # 验证
 python tests/test_sxemt.py
 

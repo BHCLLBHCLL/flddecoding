@@ -30,6 +30,7 @@ class XemtGroup:
 class XemtModel:
     materials: list[XemtMaterial] = field(default_factory=list)
     parts: list[XemtPart] = field(default_factory=list)
+    panels: list[str] = field(default_factory=list)
     groups: list[XemtGroup] = field(default_factory=list)
     fluid_name: str = ""
     fluid_mat: int = 1
@@ -63,13 +64,14 @@ def parse_xemt(path: str) -> XemtModel:
         if grp.parts:
             model.groups.append(grp)
     for panel in root.findall(".//panel"):
-        model.parts.append(
-            XemtPart(
-                int(panel.attrib["no"]),
-                panel.attrib.get("name", ""),
-                int(panel.attrib.get("mat", "1")),
-            )
-        )
+        name = panel.attrib.get("name", "")
+        if not name:
+            continue
+        if "no" in panel.attrib:
+            model.parts.append(_parse_part_elem(panel))
+        else:
+            # Boundary panels (e.g. Air_Outlet) have name only; regions live in SDAT.
+            model.panels.append(name)
     return model
 
 

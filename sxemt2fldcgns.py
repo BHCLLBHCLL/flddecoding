@@ -23,6 +23,7 @@ def convert(
     xemt_path: str,
     fld_out: str,
     cgns_out: str | None = None,
+    template_fld: str | None = None,
 ) -> dict:
     s_file = Path(s_path)
     xemt_file = Path(xemt_path)
@@ -50,6 +51,9 @@ def convert(
         s_text,
         built.volume_names,
         surface_cats=built.surface_cats,
+        template_fld=template_fld,
+        s_path=str(s_file),
+        mesh_file=model.mesh_file,
     )
 
     mesh_dict = mesh_to_fld_dict(built, fields)
@@ -59,6 +63,7 @@ def convert(
     return {
         "fld": fld_out,
         "cgns": cgns_out,
+        "template_fld": template_fld,
         "vertices": built.vertices.shape[0],
         "cells": built.cell_conn.shape[0],
         "faces": len(built.faces),
@@ -75,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("xemt_file", help="EMT metadata file (.xemt)")
     parser.add_argument("-o", "--fld-output", help="Output .fld path")
     parser.add_argument("--cgns", metavar="FILE", help="Also write CGNS to this path")
+    parser.add_argument(
+        "--template",
+        metavar="FLD",
+        help="Reference FLD for scPOST header/geometry (auto-detected by cell count if omitted)",
+    )
     parser.add_argument(
         "--verify-parse",
         action="store_true",
@@ -95,7 +105,13 @@ def main(argv: list[str] | None = None) -> int:
     cgns_out = args.cgns or str(Path(fld_out).with_suffix(".cgns"))
 
     try:
-        info = convert(str(s_path), str(xemt_path), fld_out, cgns_out)
+        info = convert(
+            str(s_path),
+            str(xemt_path),
+            fld_out,
+            cgns_out,
+            template_fld=args.template,
+        )
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -109,6 +125,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_parse:
         m = parse_fld(fld_out)
         print(f"Parse check: {m['n_vertices']} verts, {m['n_cells']} cells, fields={sorted(m['fields'].keys())}")
+        with open(fld_out, "rb") as f:
+            from fld_model import validate_scpost_geometry
+            issues = validate_scpost_geometry(f.read())
+        if issues:
+            print("scPOST geometry warnings:")
+            for issue in issues:
+                print(f"  - {issue}")
+        else:
+            print("scPOST geometry check: OK")
 
     xemt = parse_xemt_file(str(xemt_path))
     if xemt.groups:

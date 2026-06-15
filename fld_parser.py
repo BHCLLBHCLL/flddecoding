@@ -1,14 +1,34 @@
 #!/usr/bin/env python3
 """FLD format inspector — prints section layout and mesh summary."""
 
+import argparse
 import sys
 from pathlib import Path
 
-from fld_model import describe_fld_sections, parse_fld
+from fld_model import (
+    describe_fld_sections,
+    open_fld_buffer,
+    parse_fld,
+    validate_scpost_geometry,
+)
 
 
 def main():
-    path = Path(sys.argv[1] if len(sys.argv) > 1 else "tests/ex1_e_100.fld")
+    parser = argparse.ArgumentParser(description="Inspect CRDL-FLD section layout")
+    parser.add_argument(
+        "fld_file",
+        nargs="?",
+        default="tests/ex1_e_100.fld",
+        help="Input FLD file",
+    )
+    parser.add_argument(
+        "--validate-scpost",
+        action="store_true",
+        help="Check geometry preambles and volume block for known scPOST issues",
+    )
+    args = parser.parse_args()
+
+    path = Path(args.fld_file)
     if not path.is_file():
         print(f"Error: {path} not found")
         sys.exit(1)
@@ -22,6 +42,17 @@ def main():
     print(f"Volume names: {mesh.get('volume_names', [])}")
     print(f"Fields: {sorted(mesh['fields'].keys())}")
     print(f"BC groups: {len(mesh.get('bc_plan', []))}")
+
+    if args.validate_scpost:
+        with open_fld_buffer(str(path)) as data:
+            issues = validate_scpost_geometry(data)
+        if issues:
+            print("\nscPOST geometry issues:")
+            for issue in issues:
+                print(f"  - {issue}")
+        else:
+            print("\nscPOST geometry check: OK")
+
     print()
     print("Sections:")
     for sec in describe_fld_sections(str(path)):

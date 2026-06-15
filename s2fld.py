@@ -11,7 +11,13 @@ import sys
 from pathlib import Path
 
 from fld_model import parse_fld
-from fld_writer import compose_fld, default_initial_fields, patch_cycle, write_fld_from_mesh
+from fld_writer import (
+    compose_fld,
+    default_initial_fields,
+    patch_cycle,
+    resolve_template_fld,
+    write_fld_from_mesh,
+)
 from mesh_builder import build_mesh_from_sdat, mesh_to_fld_dict
 from s_model import parse_sdat_file, summarize_sdat, vertex_temperature_field
 from xemt_model import parse_xemt_file, volume_names_for_sdat
@@ -73,6 +79,12 @@ def convert_s_to_fld(
             built.volume_names,
         )
         fields = default_initial_fields(built.vertices.shape[0], temp, ambient=model.ambient_temp)
+        tpl = resolve_template_fld(
+            built.cell_conn.shape[0],
+            s_path=str(s_file),
+            mesh_file=model.mesh_file,
+            explicit=template or mesh,
+        )
         write_fld_from_mesh(
             out_path,
             built.vertices,
@@ -82,6 +94,9 @@ def convert_s_to_fld(
             s_text,
             built.volume_names,
             surface_cats=built.surface_cats,
+            template_fld=tpl,
+            s_path=str(s_file),
+            mesh_file=model.mesh_file,
         )
         n_verts = built.vertices.shape[0]
         n_cells = built.cell_conn.shape[0]
@@ -124,7 +139,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("s_file", help="Input .s solver definition")
     parser.add_argument("-o", "--output", help="Output .fld path")
     parser.add_argument("--xemt", metavar="FILE", help="EMT file — build mesh without template FLD")
-    parser.add_argument("--template", help="Template FLD (only without --xemt)")
+    parser.add_argument(
+        "--template",
+        help="Reference FLD for scPOST header/geometry (with --xemt: matched by cell count)",
+    )
     parser.add_argument("--mesh", help="Mesh FLD alias for --template")
     parser.add_argument("--cycle", type=int, default=0)
     parser.add_argument("--no-cycle-patch", action="store_true")

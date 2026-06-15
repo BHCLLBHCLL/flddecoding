@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<!-- date/time : 2023/10/31 20:21:32 -->
+<EMT>
+   <Version no="2023"/>
+   <Material>
+      <mat no="1" name="air(incompressible/20C)"/>
+      <mat no="2" name="quartz_glass(300K)"/>
+      <mat no="3" name="cedar(300K)"/>
+   </Material>
+   <Parts>
+      <fluid no="1" name="Interior" mat="1"/>
+      <part no="1" name="Interior" mat="1"/>
+      <part no="2" name="Table" mat="3"/>
+      <part no="3" name="Table2" mat="3"/>
+      <part no="4" name="Air_Conditioner"/>
+      <panel name="Air_Outlet"/>
+      <part no="5" name="Wall" mat="3"/>
+      <part no="6" name="Window" mat="2"/>
+   </Parts>
+</EMT>

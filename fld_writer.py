@@ -13,6 +13,7 @@ from typing import Optional
 import numpy as np
 
 from fld_model import (
+    fld_cell_count,
     find_section,
     iter_data_blocks,
     read_i32_be,
@@ -159,7 +160,7 @@ def _mesh_geometry_preamble(count_val: int, first_block_bc: int) -> bytes:
         + struct.pack(">iii", 12, 4, count_val)
         + struct.pack(">i", 4)
         + struct.pack(">iiii", 12, 4, 1, 1)
-        + struct.pack(">iii", 12, 4, 0x10000)
+        + struct.pack(">iii", 12, 4, 256)
         + struct.pack(">i", 4)
         + struct.pack(">iiii", 12, 1, first_block_bc, 1)
     )
@@ -211,6 +212,79 @@ def _build_f64_section(
             meta = np.zeros(4, dtype=">f8").tobytes()
             inner += _write_section_block(meta)
     return _write_named_section(section_name, inner)
+
+
+def _sdat_basename(s_text: str) -> Optional[str]:
+    """Parse basename from SDAT POST block (e.g. ex4_e)."""
+    lines = s_text.replace("\r\n", "\n").split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() == "POST" and i + 1 < len(lines):
+            name = lines[i + 1].strip()
+            return name if name else None
+    return None
+
+
+def fld_cell_count_file(path: str) -> Optional[int]:
+    """Return cell count from an FLD file, or None."""
+    data = Path(path).read_bytes()
+    return fld_cell_count(data)
+
+
+def resolve_template_fld(
+    n_cells: int,
+    s_path: Optional[str] = None,
+    s_basename: Optional[str] = None,
+    mesh_file: Optional[str] = None,
+    explicit: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Find a reference FLD for scPOST-compatible header / geometry blocks.
+
+    Prefers *explicit* when provided and cell count matches. Otherwise searches
+    next to the .s file and in ``tests/`` for ``{stem}_63.fld``, ``{stem}_100.fld``,
+    etc., and returns the first file whose cell count equals *n_cells*.
+    """
+    if explicit:
+        exp = Path(explicit)
+        if not exp.is_file():
+            raise FileNotFoundError(f"Template FLD not found: {exp}")
+        exp_cells = fld_cell_count_file(str(exp))
+        if exp_cells is not None and exp_cells != n_cells:
+            raise ValueError(
+                f"Template {exp} has {exp_cells} cells, mesh has {n_cells} cells"
+            )
+        return str(exp)
+
+    stems: list[str] = []
+    parents: list[Path] = []
+    if s_basename:
+        stems.append(s_basename)
+    if s_path:
+        s_file = Path(s_path)
+        stems.append(s_file.stem)
+        parents.append(s_file.parent)
+    if mesh_file:
+        stems.append(Path(mesh_file).stem)
+    tests_dir = Path(__file__).resolve().parent / "tests"
+    parents.append(tests_dir)
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for parent in parents:
+        for stem in stems:
+            for suffix in ("_63", "_100", "_0", ""):
+                c = parent / f"{stem}{suffix}.fld"
+                if c not in seen:
+                    seen.add(c)
+                    candidates.append(c)
+
+    for c in candidates:
+        if not c.is_file():
+            continue
+        n = fld_cell_count_file(str(c))
+        if n == n_cells:
+            return str(c)
+    return None
 
 
 def _patch_section(data: bytearray, section_name: str, new_inner: bytes) -> None:
@@ -557,15 +631,20 @@ def write_fld_from_mesh(
     cycle: int = 0,
     surface_cats: Optional[dict] = None,
     template_fld: Optional[str] = None,
+    s_path: Optional[str] = None,
+    mesh_file: Optional[str] = None,
 ) -> None:
-    """Write a complete FLD from mesh arrays (no template)."""
+    """Write a complete FLD from mesh arrays."""
     n_verts = vertices.shape[0]
     n_cells = cell_conn.shape[0]
 
     if template_fld is None:
-        default_tpl = Path(__file__).resolve().parent / "tests" / "ex4_e_63.fld"
-        if default_tpl.is_file() and n_cells == 1470392:
-            template_fld = str(default_tpl)
+        template_fld = resolve_template_fld(
+            n_cells,
+            s_path=s_path,
+            s_basename=_sdat_basename(s_text),
+            mesh_file=mesh_file,
+        )
 
     body = _vendor_header_bytes(template_fld)
 
