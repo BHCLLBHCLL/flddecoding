@@ -27,15 +27,182 @@ def _write_section_block(payload: bytes) -> bytes:
     return struct.pack(">ii", 12, bc) + payload + struct.pack(">i", bc)
 
 
+def _field_section_preamble(n_vertices: int) -> bytes:
+    """48-byte vendor header before f64 field blocks (required by scPOST)."""
+    return (
+        struct.pack(">iiii", 12, 4, 1, 1)
+        + struct.pack(">iiii", 12, 4, n_vertices, 4)
+        + struct.pack(">iiii", 12, 8, n_vertices, 1)
+    )
+
+
+def _preamble_chunk3(n_vertices: int) -> bytes:
+    """16-byte vendor chunk between consecutive vector f64 blocks."""
+    return struct.pack(">iiii", 12, 8, n_vertices, 1)
+
+
+def _field_f64_pad() -> bytes:
+    """16-byte pad after scalar f64 blocks."""
+    return struct.pack(">iiii", 12, 0, 0, 0)
+
+
+def _field_section_trailer() -> bytes:
+    """48-byte trailer between field metadata labels."""
+    return (
+        struct.pack(">iiii", 12, 4, 1, 1)
+        + struct.pack(">iiii", 12, 4, 2, 4)
+        + struct.pack(">iiii", 12, 1, 32, 1)
+    )
+
+
+def _field_section_trailer_link() -> bytes:
+    """48-byte trailer before the next field section (e.g. CN01 -> VECT)."""
+    return (
+        struct.pack(">iiii", 12, 4, 1, 1)
+        + struct.pack(">iiii", 12, 4, 2, 4)
+        + struct.pack(">iiii", 12, 4, 1, 1)
+    )
+
+
+def _section_suffix() -> bytes:
+    return struct.pack(">i", 12)
+
+
+def _write_meta_label(label: str) -> bytes:
+    text = label[:32].ljust(32).encode("ascii")
+    return _write_section_block(text)
+
+
+def _write_f64_scalar(arr: np.ndarray) -> bytes:
+    payload = np.ascontiguousarray(arr, dtype=">f8").tobytes()
+    return _write_section_block(payload) + _field_f64_pad()
+
+
+def _write_f64_vector(arr: np.ndarray, n_vertices: int) -> bytes:
+    payload = np.ascontiguousarray(arr, dtype=">f8").tobytes()
+    return _write_section_block(payload) + _preamble_chunk3(n_vertices)
+
+
+def _write_field_section_end() -> bytes:
+    return _field_section_trailer() + _section_suffix()
+
+
+def _write_linked_section_end() -> bytes:
+    """Tail for CN01 / VECT before the next field section."""
+    return (
+        _write_section_block(struct.pack(">i", 0))
+        + struct.pack(">iiii", 12, 1, 32, 1)
+        + _section_suffix()
+    )
+
+
+def _mesh_base_preamble() -> bytes:
+    """48-byte header common to mesh sections (LS_Nodes, LS_Elements, ...)."""
+    return (
+        struct.pack(">iiii", 12, 4, 1, 1)
+        + struct.pack(">iiii", 12, 4, 1, 4)
+        + struct.pack(">iiii", 12, 4, 1, 1)
+    )
+
+
+def _mesh_vertices_tail(n_vertices: int) -> bytes:
+    return (
+        struct.pack(">iii", 12, 4, n_vertices)
+        + struct.pack(">i", 4)
+        + struct.pack(">ii", 12, 8)
+        + struct.pack(">i", n_vertices)
+        + struct.pack(">i", 1)
+    )
+
+
+def _mesh_nodes_preamble(n_vertices: int) -> bytes:
+    return _mesh_base_preamble() + _mesh_vertices_tail(n_vertices)
+
+
+def _mesh_cells_tail(n_cells: int) -> bytes:
+    return (
+        struct.pack(">iii", 12, 4, n_cells)
+        + struct.pack(">i", 4)
+        + struct.pack(">iii", 12, 4, n_cells)
+        + struct.pack(">i", 1)
+    )
+
+
+def _mesh_cells_preamble(n_cells: int) -> bytes:
+    return _mesh_base_preamble() + _mesh_cells_tail(n_cells)
+
+
+def _mesh_section_tail() -> bytes:
+    """20-byte pad + suffix at end of mesh i32/f64 sections."""
+    return _field_f64_pad() + _section_suffix()
+
+
+def _mesh_i32_block_sep1() -> bytes:
+    """16-byte separator between LS_Elements blocks."""
+    return struct.pack(">iiii", 12, 4, 1, 1)
+
+
+def _mesh_i32_block_sep2(count_val: int) -> bytes:
+    """16-byte separator before connectivity block (carries flat conn size)."""
+    return struct.pack(">iiii", 12, 4, count_val, 1)
+
+
+def _mesh_geom_sep(val: int) -> bytes:
+    """16-byte separator between geometry array blocks."""
+    return struct.pack(">iiii", 12, 4, val, 1)
+
+
+def _mesh_geometry_preamble(count_val: int, first_block_bc: int) -> bytes:
+    """112-byte preamble before first block in geometry array sections."""
+    return (
+        _mesh_base_preamble()
+        + struct.pack(">iii", 12, 4, count_val)
+        + struct.pack(">i", 4)
+        + struct.pack(">iiii", 12, 4, 1, 1)
+        + struct.pack(">iii", 12, 4, 0x10000)
+        + struct.pack(">i", 4)
+        + struct.pack(">iiii", 12, 1, first_block_bc, 1)
+    )
+
+
+def _geometry_preamble_from_template(
+    data: bytes,
+    section_name: str,
+    count_val: int,
+    first_block_bc: int,
+) -> bytes:
+    sec = find_section(data, section_name)
+    if sec < 0:
+        return _mesh_geometry_preamble(count_val, first_block_bc)
+    inner = sec + 40
+    sec_end = section_end(data, sec)
+    blocks = list(iter_data_blocks(data, sec, sec_end))
+    if not blocks:
+        return _mesh_geometry_preamble(count_val, first_block_bc)
+    pre_len = blocks[0][0] - inner - 8
+    if pre_len <= 0:
+        return _mesh_geometry_preamble(count_val, first_block_bc)
+    pre = bytearray(data[inner:inner + pre_len])
+    if len(pre) >= 60:
+        struct.pack_into(">i", pre, 56, count_val)
+    if len(pre) >= 108:
+        struct.pack_into(">i", pre, 104, first_block_bc)
+    return bytes(pre)
+
+
 def _write_named_section(name: str, inner: bytes) -> bytes:
     """Section with [32][name 32B][32] prefix."""
     name_padded = name.ljust(32).encode("ascii")
     return struct.pack(">i", 32) + name_padded + struct.pack(">i", 32) + inner
 
 
-def _build_f64_section(section_name: str, arrays: list[np.ndarray]) -> bytes:
+def _build_f64_section(
+    section_name: str,
+    arrays: list[np.ndarray],
+    n_vertices: int,
+) -> bytes:
     """Build a field section with alternating f64 payloads and 4-float metadata blocks."""
-    inner = b""
+    inner = _field_section_preamble(n_vertices)
     for arr in arrays:
         payload = np.ascontiguousarray(arr, dtype=">f8").tobytes()
         inner += _write_section_block(payload)
@@ -202,11 +369,19 @@ def _write_i32_section(name: str, arrays: list[np.ndarray]) -> bytes:
     return _write_named_section(name, inner)
 
 
-def _write_f64_axes_section(name: str, axes: list[np.ndarray]) -> bytes:
-    inner = b""
-    for arr in axes:
+def _write_f64_axes_section(
+    name: str,
+    axes: list[np.ndarray],
+    n_vertices: int,
+) -> bytes:
+    inner = _mesh_nodes_preamble(n_vertices)
+    for i, arr in enumerate(axes):
         payload = np.ascontiguousarray(arr, dtype=">f8").tobytes()
         inner += _write_section_block(payload)
+        if i < len(axes) - 1:
+            inner += _preamble_chunk3(n_vertices)
+        else:
+            inner += _field_f64_pad() + _section_suffix()
     return _write_named_section(name, inner)
 
 
@@ -263,20 +438,39 @@ def _write_volume_geometry_array(
     template_path: Optional[str] = None,
 ) -> bytes:
     """Write LS_VolumeGeometryArray (names + per-cell vendor block)."""
-    labels = " ".join(volume_names).encode("ascii")
-    inner = b""
+    block0 = b"\x00" * 16384
+    block1 = b"\x00" * 256
+    cell_block: Optional[bytes] = None
+    preamble = _mesh_geometry_preamble(64, len(block0))
     if template_path and Path(template_path).is_file():
         data = Path(template_path).read_bytes()
         sec = find_section(data, "LS_VolumeGeometryArray")
         if sec >= 0:
             blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
-            for p, bc in blocks[:2]:
-                inner += _write_section_block(bytes(data[p:p + bc]))
-    if not inner:
-        inner = _write_section_block(b"\x00" * 16384)
-        inner += _write_section_block(b"\x00" * 256)
-    cell_block = np.zeros(n_cells, dtype=">f8").tobytes()
+            if blocks:
+                preamble = _geometry_preamble_from_template(
+                    data, "LS_VolumeGeometryArray", 64, blocks[0][1],
+                )
+                p0, bc0 = blocks[0]
+                block0 = bytes(data[p0:p0 + bc0])
+            if len(blocks) > 1:
+                p1, bc1 = blocks[1]
+                block1 = bytes(data[p1:p1 + bc1])
+            if len(blocks) > 2:
+                p2, bc2 = blocks[2]
+                if bc2 == n_cells * 8:
+                    cell_block = bytes(data[p2:p2 + bc2])
+    inner = preamble
+    inner += _write_section_block(block0)
+    inner += _mesh_geom_sep(64)
+    inner += _write_section_block(block1)
+    conn_int_count = n_cells * 8
+    inner += _mesh_geom_sep(conn_int_count * 4)
+    if cell_block is None:
+        ids = np.arange(1, 2 * n_cells + 1, dtype=">i4")
+        cell_block = ids.tobytes()
     inner += _write_section_block(cell_block)
+    inner += _mesh_section_tail()
     return _write_named_section("LS_VolumeGeometryArray", inner)
 
 
@@ -301,34 +495,54 @@ def _write_surface_geometry_array(
     arr3 = np.array([flat + 1 for _, flat in seg1], dtype=np.int32)
     arr5 = np.array([list(q) for q, _ in seg1], dtype=np.int32).reshape(-1)
 
-    inner = b""
+    block0 = b"\x00" * 4608
+    preamble = _mesh_geometry_preamble(len(meta), len(block0))
     block4 = b"\x00" * 72
-    bc_blocks: list[bytes] = []
+    tpl_data: Optional[bytes] = None
     if template_path and Path(template_path).is_file():
-        data = Path(template_path).read_bytes()
-        sec = find_section(data, "LS_SurfaceGeometryArray")
+        tpl_data = Path(template_path).read_bytes()
+        sec = find_section(tpl_data, "LS_SurfaceGeometryArray")
         if sec >= 0:
-            blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
+            blocks = list(iter_data_blocks(tpl_data, sec, section_end(tpl_data, sec)))
             if blocks:
+                preamble = _geometry_preamble_from_template(
+                    tpl_data,
+                    "LS_SurfaceGeometryArray",
+                    len(meta),
+                    blocks[0][1],
+                )
                 p0, bc0 = blocks[0]
-                inner += _write_section_block(bytes(data[p0:p0 + bc0]))
+                block0 = bytes(tpl_data[p0:p0 + bc0])
             if len(blocks) > 4:
                 p4, bc4 = blocks[4]
-                block4 = bytes(data[p4:p4 + bc4])
-            for p, bc in blocks[6:]:
-                bc_blocks.append(bytes(data[p:p + bc]))
+                block4 = bytes(tpl_data[p4:p4 + bc4])
 
-    if not inner:
-        inner = _write_section_block(b"\x00" * 4608)
+    face_bc = n_faces * 4
+    meta_count = len(meta)
 
+    inner = preamble
+    inner += _write_section_block(block0)
+    inner += _mesh_geom_sep(meta_count)
     inner += _write_section_block(meta.astype(">i4", copy=False).tobytes())
+    inner += _mesh_geom_sep(face_bc)
     inner += _write_section_block(np.ascontiguousarray(arr2, dtype=">i4").tobytes())
+    inner += _mesh_geom_sep(face_bc)
     inner += _write_section_block(np.ascontiguousarray(arr3, dtype=">i4").tobytes())
+    inner += _mesh_geom_sep(meta_count)
     inner += _write_section_block(block4)
+    inner += _mesh_geom_sep(face_bc)
     inner += _write_section_block(np.ascontiguousarray(arr5, dtype=">i4").tobytes())
-    for block in bc_blocks:
-        inner += _write_section_block(block)
 
+    if tpl_data is not None:
+        sec = find_section(tpl_data, "LS_SurfaceGeometryArray")
+        if sec >= 0:
+            tpl_blocks = list(iter_data_blocks(tpl_data, sec, section_end(tpl_data, sec)))
+            if len(tpl_blocks) >= 6:
+                link_start = tpl_blocks[5][0] + tpl_blocks[5][1] + 4
+                link_end = section_end(tpl_data, sec) - 20
+                inner += bytes(tpl_data[link_start:link_end])
+
+    inner += _mesh_section_tail()
     return _write_named_section("LS_SurfaceGeometryArray", inner)
 
 
@@ -356,59 +570,67 @@ def write_fld_from_mesh(
     body = _vendor_header_bytes(template_fld)
 
     if "PRES" in fields:
-        inner = _write_section_block(np.ascontiguousarray(fields["PRES"], dtype=">f8").tobytes())
-        inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
+        inner = _field_section_preamble(n_verts)
+        inner += _write_f64_scalar(fields["PRES"])
+        inner += _write_meta_label("LS_Scalar:TEMP")
+        inner += _write_field_section_end()
         body += _write_named_section("Pressure", inner)
 
     if "TEMP" in fields:
-        temp_inner = _write_section_block(np.ascontiguousarray(fields["TEMP"], dtype=">f8").tobytes())
-        temp_inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
-        temp_inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
+        temp_inner = _field_section_preamble(n_verts)
+        temp_inner += _write_f64_scalar(fields["TEMP"])
+        temp_inner += _write_meta_label("LS_Scalar:TURK") + _field_section_trailer()
+        temp_inner += _write_meta_label("Turbulence K") + _field_section_preamble(n_verts)
         if "TURK" in fields:
-            temp_inner += _write_section_block(np.ascontiguousarray(fields["TURK"], dtype=">f8").tobytes())
-        temp_inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
-        temp_inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
+            temp_inner += _write_f64_scalar(fields["TURK"])
+        temp_inner += _write_meta_label("LS_Scalar:TEPS") + _field_section_trailer()
+        temp_inner += _write_meta_label("Turbulence E") + _field_section_preamble(n_verts)
         if "TEPS" in fields:
-            temp_inner += _write_section_block(np.ascontiguousarray(fields["TEPS"], dtype=">f8").tobytes())
-        temp_inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
+            temp_inner += _write_f64_scalar(fields["TEPS"])
+        temp_inner += _write_meta_label("LS_Scalar:CN01")
+        temp_inner += _write_field_section_end()
         body += _write_named_section("Temperature", temp_inner)
 
-    cn_arrays = []
+    cn_arrays: list[tuple[np.ndarray, str, str]] = []
     if "CN01" in fields:
-        cn_arrays.append(fields["CN01"])
+        cn_arrays.append((fields["CN01"], "LS_Scalar:HTRC", "HEAT TRANSFER COEF."))
     if "HTRC" in fields:
-        cn_arrays.append(fields["HTRC"])
+        cn_arrays.append((fields["HTRC"], "LS_Scalar:SURT", "WALL TEMPERATURE"))
     if "SURT" in fields:
-        cn_arrays.append(fields["SURT"])
+        cn_arrays.append((fields["SURT"], "LS_Scalar:HTFX", "WALL HEAT FLUX"))
     if "HTFX" in fields:
-        cn_arrays.append(fields["HTFX"])
+        cn_arrays.append((fields["HTFX"], "LS_Vector:VECT", ""))
     if cn_arrays:
-        cn_inner = b""
-        for arr in cn_arrays:
-            cn_inner += _write_section_block(np.ascontiguousarray(arr, dtype=">f8").tobytes())
-            if arr.size > 4:
-                cn_inner += _write_section_block(np.zeros(4, dtype=">f8").tobytes())
+        cn_inner = _field_section_preamble(n_verts)
+        for idx, (arr, ls_label, desc_label) in enumerate(cn_arrays):
+            cn_inner += _write_f64_scalar(arr)
+            if desc_label:
+                cn_inner += _write_meta_label(ls_label) + _field_section_trailer()
+                cn_inner += _write_meta_label(desc_label) + _field_section_preamble(n_verts)
+            else:
+                cn_inner += _write_meta_label(ls_label) + _field_section_trailer_link()
+                cn_inner += _write_linked_section_end()
         body += _write_named_section("CN01", cn_inner)
 
     vx = fields.get("VECTX", np.zeros(n_verts))
     vy = fields.get("VECTY", np.zeros(n_verts))
     vz = fields.get("VECTZ", np.zeros(n_verts))
-    vect_inner = (
-        _write_section_block(np.ascontiguousarray(vx, dtype=">f8").tobytes())
-        + _write_section_block(np.ascontiguousarray(vy, dtype=">f8").tobytes())
-        + _write_section_block(np.ascontiguousarray(vz, dtype=">f8").tobytes())
-        + _write_section_block(np.zeros(4, dtype=">f8").tobytes())
-    )
+    vect_inner = _field_section_preamble(n_verts)
+    vect_inner += _write_f64_vector(vx, n_verts)
+    vect_inner += _write_f64_vector(vy, n_verts)
+    vect_inner += _write_f64_vector(vz, n_verts)
+    vect_inner += _write_meta_label("LS_Vector:HVEC") + _field_section_trailer_link()
+    vect_inner += _write_linked_section_end()
     body += _write_named_section("VECT", vect_inner)
 
     hx = fields.get("HVECX", np.zeros(n_verts))
     hy = fields.get("HVECY", np.zeros(n_verts))
     hz = fields.get("HVECZ", np.zeros(n_verts))
-    hvec_inner = (
-        _write_section_block(np.ascontiguousarray(hx, dtype=">f8").tobytes())
-        + _write_section_block(np.ascontiguousarray(hy, dtype=">f8").tobytes())
-        + _write_section_block(np.ascontiguousarray(hz, dtype=">f8").tobytes())
-    )
+    hvec_inner = _field_section_preamble(n_verts)
+    hvec_inner += _write_f64_vector(hx, n_verts)
+    hvec_inner += _write_f64_vector(hy, n_verts)
+    hvec_inner += _write_f64_vector(hz, n_verts)
+    hvec_inner += _section_suffix()
     body += _write_named_section("HVEC", hvec_inner)
 
     if template_fld and Path(template_fld).is_file():
@@ -419,13 +641,27 @@ def write_fld_from_mesh(
     body += _write_f64_axes_section(
         "LS_Nodes",
         [vertices[:, 0], vertices[:, 1], vertices[:, 2]],
+        n_verts,
     )
-    body += _write_i32_section("LS_MatOfElements", [material.astype(np.int32)])
+    mat_inner = _mesh_cells_preamble(n_cells)
+    mat_inner += _write_section_block(
+        np.ascontiguousarray(material, dtype=">i4").tobytes()
+    )
+    mat_inner += _mesh_section_tail()
+    body += _write_named_section("LS_MatOfElements", mat_inner)
+
     elem_meta = np.full(n_cells, 38, dtype=np.int32)
-    body += _write_i32_section(
-        "LS_Elements",
-        [elem_meta, cell_conn.astype(np.int32).reshape(-1)],
+    conn_flat = cell_conn.astype(np.int32).reshape(-1)
+    elem_inner = _mesh_cells_preamble(n_cells)
+    elem_inner += _write_section_block(np.ascontiguousarray(elem_meta, dtype=">i4").tobytes())
+    elem_inner += _mesh_i32_block_sep1()
+    elem_inner += _write_section_block(struct.pack(">i", conn_flat.size))
+    elem_inner += _mesh_i32_block_sep2(conn_flat.size)
+    elem_inner += _write_section_block(
+        np.ascontiguousarray(conn_flat, dtype=">i4").tobytes()
     )
+    elem_inner += _mesh_section_tail()
+    body += _write_named_section("LS_Elements", elem_inner)
 
     labels = " ".join(volume_names).encode("ascii")
     body += _write_volume_geometry_array(volume_names, n_cells, template_fld)
@@ -436,13 +672,21 @@ def write_fld_from_mesh(
     normalized = s_text.replace("\r\n", "\n").lstrip("\ufeff")
     if not normalized.startswith("SDAT"):
         normalized = "SDAT\n" + normalized
-    sfile_payload = normalized.encode("utf-8")
-    sfile_inner = _write_section_block(struct.pack(">d", 1.0))
-    slot = max(len(sfile_payload) + 64, 6144)
-    sfile_inner += _write_section_block(sfile_payload + b"\x00" * (slot - len(sfile_payload)))
-    body += _write_named_section("LS_SFile", sfile_inner)
 
-    body += _write_named_section("OverlapEnd", _write_section_block(struct.pack(">i", 0)))
+    if template_fld and Path(template_fld).is_file():
+        tpl = bytearray(Path(template_fld).read_bytes())
+        _patch_sfile(normalized, tpl)
+        body += _section_bytes(tpl, "LS_SFile")
+    else:
+        sfile_payload = normalized.encode("utf-8")
+        sfile_inner = _write_section_block(struct.pack(">d", 1.0))
+        slot = max(len(sfile_payload) + 64, 6144)
+        sfile_inner += _write_section_block(
+            sfile_payload + b"\x00" * (slot - len(sfile_payload))
+        )
+        body += _write_named_section("LS_SFile", sfile_inner)
+
+    body += _write_named_section("OverlapEnd", b"")
 
     out = _fld_prefix() + body
     Path(out_path).write_bytes(out)
