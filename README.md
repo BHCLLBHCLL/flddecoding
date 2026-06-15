@@ -8,6 +8,11 @@
 pip install -r requirements.txt
 ```
 
+## 文档
+
+- [开发总结](docs/DEVELOPMENT_SUMMARY.md) — 架构、攻关过程、scPOST 兼容性要点
+- [FLD 格式说明](docs/FLD_FORMAT.md) — CRDL-FLD 节布局、数据块编码、各节二进制细节
+
 ## 用法
 
 ### FLD → CGNS
