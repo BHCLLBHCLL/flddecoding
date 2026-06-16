@@ -39,7 +39,7 @@ python sxemt2fldcgns.py tests/ex1_e.s tests/ex1_e.xemt
 # 或仅 FLD
 python s2fld.py tests/ex1_e.s --xemt tests/ex1_e.xemt -o tests/ex1_e_0.fld
 
-# 指定参考 FLD（scPOST 头/几何块）；未指定时按单元数自动匹配 tests/{stem}_63.fld 等
+# 指定参考 FLD（scPOST 头/几何块）；未指定时按 stem 自动匹配 tests/{stem}_151.fld、_63.fld 等
 python sxemt2fldcgns.py tests/ex4_e.s tests/ex4_e.xemt --template tests/ex4_e_63.fld
 
 # 检查 scPOST 几何节
@@ -48,14 +48,23 @@ python fld_parser.py tests/ex4_e_from_sxemt.fld --validate-scpost
 # 验证
 python tests/test_sxemt.py
 
-# 手机散热例（ex4_e：32 部件 + cellular_phone 分组）
+# 室内空调例 ex3_e（scPOST 已验证可读）
+python sxemt2fldcgns.py tests/ex3_e.s tests/ex3_e.xemt -o tests/ex3_e_from_sxemt.fld --verify-parse
+python tests/compare_ex3_fld.py
+python tests/test_ex3_mesh.py
+
+# 手机散热例 ex4_e（32 部件 + cellular_phone 分组）
 python sxemt2fldcgns.py tests/ex4_e.s tests/ex4_e.xemt
 python tests/test_ex4_mesh.py
 ```
 
 网格由 CXYZ 结构化六面体生成；PARTS 支持多部件、多盒区域（`/` 分隔部件组）；固–流及多材料界面按材料 ID 复制节点。
 
-`ex4_e` 导出与官方一致：`PARTS1`…`PARTS32`（按 SDAT 部件序号）及 `lower_cover_01`、`battery`、`(cuboid)_IC_01` 等 32 个部件名元素段（共 64 个体段），`LS_VolumeGeometryArray` 同名标签列表；`.xemt` 中 `cellular_phone` 分组会被解析并打印。
+`ex4_e` 导出与官方一致：`PARTS1`…`PARTS32`（按 SDAT 部件序号）及部件名元素段（共 64 个体段），`LS_VolumeGeometryArray` 同名标签列表。
+
+`ex3_e` 使用 **10 个体段槽**（256 B/名，自 `ex3_e_151.fld` 模板），体标志按 5 桶自模板缩放；网格单元数可与官方 step-151 不同，但 scPOST 几何节已对齐。**`ex3_e_from_sxemt.fld` 已在 scPOST 2025.2 验证可读。**
+
+`.xemt` 中部件分组（如 `cellular_phone`）会被解析并打印。
 
 ### SDAT (.s) → FLD（模板方式，可选）
 
@@ -70,9 +79,9 @@ python s_parser.py tests/ex1_e.s
 | 节 | 内容 |
 |----|------|
 | `LS_Nodes` | 顶点坐标 R8[n,3]（X/Y/Z 三轴块） |
-| `LS_MatOfElements` | 每单元材料 ID（1/2 → PARTS1/PARTS2） |
+| `LS_MatOfElements` | 每单元材料 ID（1–7；写出时将 SDAT 的 0 映射为 1） |
 | `LS_Elements` | 六面体单元连通 I4[n_cells×8] |
-| `LS_VolumeGeometryArray` | 体区域名（PARTS1、Domain(cuboid)、Iron 等） |
+| `LS_VolumeGeometryArray` | 体区域名 + block1 桶计数 + 每单元 vol-flag 对（ex3：10 槽 / 5 桶） |
 | `LS_SurfaceGeometryArray` | 边界面四边形 + BC 元数据 |
 | `Pressure` / `Temperature` / `CN01` / `VECT` / `HVEC` | 顶点中心场变量 |
 

@@ -4,6 +4,10 @@ Convert scFLOW SDAT (.s) + EMT (.xemt) to FLD and CGNS without .r or template FL
 
 Mesh is built from CXYZ spacing and PARTS iron box in the .s file.
 Part/material names come from the .xemt file.
+
+scPOST geometry (Volume/Surface arrays, vol flags) uses an optional reference FLD
+auto-matched by case stem (e.g. tests/ex3_e_151.fld). The template need not have
+the same cell count as the output mesh (ex3 verified).
 """
 
 import argparse
@@ -54,6 +58,7 @@ def convert(
         template_fld=template_fld,
         s_path=str(s_file),
         mesh_file=model.mesh_file,
+        cell_part=built.cell_part,
     )
 
     mesh_dict = mesh_to_fld_dict(built, fields)
@@ -83,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--template",
         metavar="FLD",
-        help="Reference FLD for scPOST header/geometry (auto-detected by cell count if omitted)",
+        help="Reference FLD for scPOST header/geometry (auto-detected by stem, e.g. ex3_e_151.fld)",
     )
     parser.add_argument(
         "--verify-parse",

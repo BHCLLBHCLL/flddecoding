@@ -168,7 +168,15 @@ def _parse_volume_names(data: bytes) -> list[str]:
     sec_end = section_end(data, sec_start)
     for p, bc in iter_data_blocks(data, sec_start, sec_end):
         raw = data[p : p + bc]
-        if all(b == 0 or 32 <= b < 127 for b in raw):
+        if bc >= 256 and all(b == 0 or 32 <= b < 127 for b in raw):
+            slot_names: list[str] = []
+            for off in range(0, bc, 256):
+                chunk = raw[off : off + 256]
+                text = chunk.split(b"\x00")[0].decode("ascii", errors="replace").strip()
+                if text:
+                    slot_names.append(text)
+            if slot_names:
+                return slot_names
             text = raw.decode("ascii", errors="replace").strip("\x00").rstrip()
             if text:
                 names = [s.strip() for s in text.split() if s.strip()]
@@ -392,6 +400,64 @@ def fld_cell_count(data: bytes) -> Optional[int]:
     return blocks[0][1] // 4
 
 
+def volume_block1_half_counts(data: bytes) -> Optional[list[int]]:
+    """Return the first-half i32 counts from LS_VolumeGeometryArray block1."""
+    vol_sec = find_section(data, "LS_VolumeGeometryArray")
+    if vol_sec < 0:
+        return None
+    blocks = list(iter_data_blocks(data, vol_sec, section_end(data, vol_sec)))
+    if len(blocks) < 2:
+        return None
+    inner = vol_sec + 40
+    pre_len = blocks[0][0] - inner - 8
+    count_val = read_i32_be(data[inner:inner + pre_len], 56) if pre_len >= 60 else None
+    if not count_val:
+        return None
+    half = count_val // 2
+    p1, bc1 = blocks[1]
+    if bc1 < half * 4:
+        return None
+    return [read_i32_be(data, p1 + i * 4) for i in range(half)]
+
+
+def vol_flag_pair_issues(data: bytes, n_cells: Optional[int] = None) -> list[str]:
+    """
+    Check LS_VolumeGeometryArray block2 vol-flag pairs for scPOST bounds.
+
+    Official FLDs keep ``lo <= n_cells - 1`` and ``hi <= n_cells``; violations
+    cause ``CreateVolFlag64_2`` / Relocating volumes to crash.
+    """
+    if n_cells is None:
+        n_cells = fld_cell_count(data)
+    if not n_cells:
+        return []
+    vol_sec = find_section(data, "LS_VolumeGeometryArray")
+    if vol_sec < 0:
+        return []
+    blocks = list(iter_data_blocks(data, vol_sec, section_end(data, vol_sec)))
+    if len(blocks) < 3:
+        return []
+    p2, bc2 = blocks[2]
+    if bc2 != n_cells * 8:
+        return [
+            f"LS_VolumeGeometryArray: block2 is {bc2} bytes, expected {n_cells * 8}",
+        ]
+
+    pairs = np.frombuffer(data[p2:p2 + bc2], dtype=">i4").reshape(-1, 2)
+    lo_bad = int(np.sum(pairs[:, 0] >= n_cells))
+    hi_bad = int(np.sum(pairs[:, 1] > n_cells))
+    issues: list[str] = []
+    if lo_bad:
+        issues.append(
+            f"LS_VolumeGeometryArray: {lo_bad} vol-flag pairs have lo >= n_cells ({n_cells})"
+        )
+    if hi_bad:
+        issues.append(
+            f"LS_VolumeGeometryArray: {hi_bad} vol-flag pairs have hi > n_cells ({n_cells})"
+        )
+    return issues
+
+
 def validate_scpost_geometry(data: bytes) -> list[str]:
     """
     Check geometry sections for known scPOST failure patterns.
@@ -399,7 +465,26 @@ def validate_scpost_geometry(data: bytes) -> list[str]:
     Returns a list of human-readable issue strings (empty if OK).
     """
     issues: list[str] = []
+    if find_section(data, "ApplicationVersion") < 0:
+        issues.append(
+            "Missing ApplicationVersion in file header (minimal header); "
+            "scPOST typically fails near byte 88 with 'FLD File may be broken'"
+        )
     n_cells = fld_cell_count(data)
+
+    mat_sec = find_section(data, "LS_MatOfElements")
+    if mat_sec >= 0 and n_cells:
+        blocks = list(iter_data_blocks(data, mat_sec, section_end(data, mat_sec)))
+        if blocks:
+            mat = np.frombuffer(
+                data, dtype=">i4", count=blocks[0][1] // 4, offset=blocks[0][0],
+            )
+            n0 = int(np.sum(mat == 0))
+            if n0:
+                issues.append(
+                    f"LS_MatOfElements: {n0} cells have material id 0; "
+                    "vendor FLD uses 1..7 — map 0→1 on export"
+                )
 
     for sec_name in ("LS_VolumeGeometryArray", "LS_SurfaceGeometryArray"):
         sec = find_section(data, sec_name)
@@ -429,7 +514,103 @@ def validate_scpost_geometry(data: bytes) -> list[str]:
                     "LS_VolumeGeometryArray: per-cell block (block2) is all zeros; "
                     "scPOST CreateVolFlag64 may hang during Relocating volumes"
                 )
+        if len(blocks) > 1:
+            inner = vol_sec + 40
+            pre_len = blocks[0][0] - inner - 8
+            count_val = None
+            if pre_len >= 60:
+                count_val = read_i32_be(data[inner:inner + pre_len], 56)
+            p1, bc1 = blocks[1]
+            if count_val is not None and bc1 != count_val * 4:
+                issues.append(
+                    f"LS_VolumeGeometryArray: block1 size is {bc1} bytes, "
+                    f"expected count_val*4 ({count_val * 4}); scPOST may fail while reading volumes"
+                )
+            half = count_val // 2 if count_val else 0
+            if half and bc1 >= half * 4:
+                half_sum = sum(
+                    read_i32_be(data, p1 + i * 4)
+                    for i in range(half)
+                )
+                if n_cells is not None and half_sum != n_cells:
+                    issues.append(
+                        f"LS_VolumeGeometryArray: block1 first-half sum is {half_sum}, "
+                        f"expected n_cells ({n_cells})"
+                    )
+            end1 = blocks[1][0] + blocks[1][1] + 4
+            if (
+                end1 + 16 <= section_end(data, vol_sec)
+                and read_i32_be(data, end1) == 12
+                and read_i32_be(data, end1 + 4) == 4
+            ):
+                sep_val = read_i32_be(data, end1 + 8)
+                expected = n_cells * 2
+                if sep_val != expected:
+                    issues.append(
+                        f"LS_VolumeGeometryArray: separator before block2 is {sep_val}, "
+                        f"expected n_cells*2 ({expected})"
+                    )
+
+    sfile_sec = find_section(data, "LS_SFile")
+    if sfile_sec >= 0:
+        if not _has_vendor_sfile_from_data(data):
+            issues.append(
+                "LS_SFile missing 48-byte vendor preamble; "
+                "scPOST may fail near end of file when reading SDAT block"
+            )
+
+    surf_sec = find_section(data, "LS_SurfaceGeometryArray")
+    if surf_sec >= 0:
+        inner = surf_sec + 40
+        blocks = list(iter_data_blocks(data, surf_sec, section_end(data, surf_sec)))
+        if len(blocks) > 1:
+            pre_len = blocks[0][0] - inner - 8
+            count_val = read_i32_be(data[inner:inner + pre_len], 56) if pre_len >= 60 else None
+            p1, bc1 = blocks[1]
+            if count_val is not None and bc1 != count_val * 4:
+                issues.append(
+                    f"LS_SurfaceGeometryArray: block1 size is {bc1} bytes, "
+                    f"expected count_val*4 ({count_val * 4})"
+                )
+        if len(blocks) > 2:
+            n_faces = blocks[2][1] // 4
+            end1 = blocks[1][0] + blocks[1][1] + 4
+            if (
+                end1 + 16 <= section_end(data, surf_sec)
+                and read_i32_be(data, end1) == 12
+                and read_i32_be(data, end1 + 4) == 4
+            ):
+                sep_val = read_i32_be(data, end1 + 8)
+                if sep_val != n_faces:
+                    issues.append(
+                        f"LS_SurfaceGeometryArray: separator after meta is {sep_val}, "
+                        f"expected face count {n_faces}"
+                    )
+            if len(blocks) > 1:
+                meta_len = blocks[1][1] // 4
+                meta_vals = [
+                    read_i32_be(data, blocks[1][0] + i * 4)
+                    for i in range(meta_len)
+                ]
+                if meta_vals and sum(meta_vals) != n_faces:
+                    issues.append(
+                        f"LS_SurfaceGeometryArray: meta sum {sum(meta_vals)} != "
+                        f"face count {n_faces}"
+                    )
+
+    issues.extend(vol_flag_pair_issues(data, n_cells))
     return issues
+
+
+def _has_vendor_sfile_from_data(data: bytes) -> bool:
+    sec = find_section(data, "LS_SFile")
+    if sec < 0:
+        return False
+    blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
+    if len(blocks) < 2:
+        return False
+    pre_len = blocks[0][0] - (sec + 40) - 8
+    return pre_len >= 48
 
 
 def describe_fld_sections(filepath: str) -> list[dict[str, Any]]:

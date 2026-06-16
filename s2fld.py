@@ -3,7 +3,9 @@
 Convert scFLOW / SCTpre SDAT solver file (.s) to FLD field file.
 
 When --xemt is given (recommended), mesh is built from CXYZ + PARTS box without
-.r or template FLD. Otherwise falls back to template FLD copy (--template).
+.r or template FLD. Geometry layout template (e.g. tests/ex3_e_151.fld) is auto-
+selected by stem for scPOST-compatible Volume/Surface sections; cell count need
+not match the template. Otherwise falls back to template FLD copy (--template).
 """
 
 import argparse
@@ -97,6 +99,7 @@ def convert_s_to_fld(
             template_fld=tpl,
             s_path=str(s_file),
             mesh_file=model.mesh_file,
+            cell_part=built.cell_part,
         )
         n_verts = built.vertices.shape[0]
         n_cells = built.cell_conn.shape[0]

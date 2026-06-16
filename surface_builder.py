@@ -202,3 +202,44 @@ def surface_meta_counts(cats: dict[str, list[FaceRec]], ymax_name: str = "Ymax")
         len(cats["Zmax"]),
         len(cats["Zmin"]),
     ], dtype=np.int32)
+
+
+def surface_seg1_order_ex3(ymax_name: str = "Ymax") -> list[str]:
+    """Face block order for ex3 (16-slot meta); must match meta field order."""
+    return [
+        "@UNDEFINEDENTB",
+        "@UNDEFINEDENTF",
+        "@UNDEFINEDENTS",
+        "@UNDEFINEDENTX",
+        "@UNDEFINEDVFWL",
+        "@UNDEFINEDMOM",
+        "Zmax",
+        "Zmin",
+        "PARTS",
+        "SURFACE",
+        "Xmax",
+        "Xmin",
+        ymax_name,
+        "Ymin",
+    ]
+
+
+def surface_meta_counts_ex3(cats: dict[str, list[FaceRec]], ymax_name: str = "Ymax") -> np.ndarray:
+    """16-int meta block for LS_SurfaceGeometryArray (vendor ex3 layout)."""
+    return np.array([
+        0, 0,
+        len(cats["@UNDEFINEDENTB"]),
+        len(cats["@UNDEFINEDENTF"]),
+        len(cats["@UNDEFINEDENTS"]),
+        len(cats["@UNDEFINEDENTX"]),
+        len(cats["@UNDEFINEDVFWL"]),
+        len(cats["@UNDEFINEDMOM"]),
+        len(cats["Zmax"]),
+        len(cats["Zmin"]),
+        len(cats["PARTS"]),
+        len(cats["SURFACE"]),
+        len(cats["Xmax"]),
+        len(cats["Xmin"]),
+        len(cats[ymax_name]),
+        len(cats["Ymin"]),
+    ], dtype=np.int32)
