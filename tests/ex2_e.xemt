@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<!-- date/time : 2023/10/31 20:17:13 -->
+<EMT>
+   <Version no="2023"/>
+   <Material>
+      <mat no="1" name="air(incompressible/20C)"/>
+      <mat no="2" name="epoxy_resin(300K)"/>
+      <mat no="3" name="silicon_resin(300K)"/>
+      <mat no="4" name="polycarbonate_resin(273K)"/>
+      <mat no="5" name="ADC10_diecast_aluminum(300K)"/>
+   </Material>
+   <Parts>
+      <fluid no="1" name="Domain(cuboid)" mat="1"/>
+      <part no="1" name="Domain(cuboid)" mat="1"/>
+      <part no="2" name="CASE" mat="4"/>
+      <panel no="6" name="FAN"/>
+      <part no="3" name="PCB" mat="2"/>
+      <part no="4" name="CPU" mat="3"/>
+      <part no="5" name="FIN" mat="5"/>
+   </Parts>
+</EMT>

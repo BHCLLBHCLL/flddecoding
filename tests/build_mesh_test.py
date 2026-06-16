@@ -95,5 +95,7 @@ for k in range(nk):
                 bad += 1
                 if bad <= 3:
                     print("bad cell", i, j, k, "built", built, "fld", conn_fld[idx])
-print("bad cells", bad, "mat match", np.all(cmat.reshape(-1) == mat_fld))
+from mesh_builder import _flatten_cells_vendor
+
+print("bad cells", bad, "mat match", np.all(_flatten_cells_vendor(cmat, ni, nj, nk) == mat_fld))
 print("total nodes", next_id - 1)

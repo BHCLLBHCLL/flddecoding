@@ -53,6 +53,10 @@ python sxemt2fldcgns.py tests/ex3_e.s tests/ex3_e.xemt -o tests/ex3_e_from_sxemt
 python tests/compare_ex3_fld.py
 python tests/test_ex3_mesh.py
 
+# 电子散热 ex2_e（CPU/PCB/FIN）
+python sxemt2fldcgns.py tests/ex2_e.s tests/ex2_e.xemt -o tests/ex2_e_from_sxemt.fld --verify-parse
+python tests/test_ex2_mesh.py
+
 # 手机散热例 ex4_e（32 部件 + cellular_phone 分组）
 python sxemt2fldcgns.py tests/ex4_e.s tests/ex4_e.xemt
 python tests/test_ex4_mesh.py
@@ -62,7 +66,9 @@ python tests/test_ex4_mesh.py
 
 `ex4_e` 导出与官方一致：`PARTS1`…`PARTS32`（按 SDAT 部件序号）及部件名元素段（共 64 个体段），`LS_VolumeGeometryArray` 同名标签列表。
 
-`ex3_e` 使用 **10 个体段槽**（256 B/名，自 `ex3_e_151.fld` 模板），体标志按 5 桶自模板缩放；网格单元数可与官方 step-151 不同，但 scPOST 几何节已对齐。**`ex3_e_from_sxemt.fld` 已在 scPOST 2025.2 验证可读。**
+`ex3_e` 使用 **10 个体段槽**（自 `ex3_e_151.fld`），体标志 5 桶缩放；**`ex3_e_from_sxemt.fld` 已在 scPOST 验证可读。**
+
+`ex2_e` 无官方 FLD 时回退 `ex4_e_63.fld` 模板；vol-flag 自 ex4 **整块比例缩放**至 409188 单元；表面 BC link 区仅在模板 stem 与案例一致时复制。
 
 `.xemt` 中部件分组（如 `cellular_phone`）会被解析并打印。
 

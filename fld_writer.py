@@ -270,7 +270,7 @@ def _template_fld_candidates(
     seen: set[Path] = set()
     for parent in parents:
         for stem in stems:
-            for suffix in ("_151", "_63", "_100", "_0", ""):
+            for suffix in ("_151", "_67", "_63", "_100", "_0", ""):
                 c = parent / f"{stem}{suffix}.fld"
                 if c not in seen:
                     seen.add(c)
@@ -282,7 +282,12 @@ def _template_fld_candidates(
         if c in seen or _is_generated_fld(c):
             continue
         seen.add(c)
-        if c.stem.endswith("_63") or c.stem.endswith("_100") or c.stem.endswith("_151"):
+        if (
+            c.stem.endswith("_63")
+            or c.stem.endswith("_67")
+            or c.stem.endswith("_100")
+            or c.stem.endswith("_151")
+        ):
             official_pool.append(c)
         else:
             other_pool.append(c)
@@ -458,6 +463,31 @@ def resolve_geometry_layout_fld(
     return _pick_reference_fld(
         _template_fld_candidates(s_path, s_basename, mesh_file),
         prefer_stems=_prefer_stems(s_path, s_basename, mesh_file),
+    )
+
+
+def resolve_surface_geometry_fld(
+    s_path: Optional[str] = None,
+    s_basename: Optional[str] = None,
+    mesh_file: Optional[str] = None,
+    explicit: Optional[str] = None,
+) -> Optional[str]:
+    """Reference FLD for LS_SurfaceGeometryArray (16- or 18-slot meta only)."""
+    if explicit and Path(explicit).is_file():
+        mc = _surface_geometry_meta_count(str(explicit))
+        if mc in (16, 18):
+            return str(Path(explicit))
+
+    for path in _template_fld_candidates(s_path, s_basename, mesh_file):
+        if not path.is_file():
+            continue
+        mc = _surface_geometry_meta_count(str(path))
+        if mc in (16, 18):
+            return str(path)
+    return resolve_geometry_layout_fld(
+        s_path=s_path,
+        s_basename=s_basename,
+        mesh_file=mesh_file,
     )
 
 
@@ -800,13 +830,14 @@ def _volume_block1_half_counts(
 def _volume_export_layout(
     volume_names: list[str],
     template_path: Optional[str],
+    case_stem: Optional[str] = None,
 ) -> tuple[int, list[str], int, bool]:
     """
     Return (count_val, names, block0_size, ex3_buckets) for LS_VolumeGeometryArray.
 
     ex3 vendor files use 10 fixed 256-byte name slots and five bucket counts in block1.
     """
-    ex3 = _volume_geometry_ex3_style(template_path)
+    ex3 = _volume_geometry_ex3_style(template_path, case_stem)
     if ex3 and template_path and Path(template_path).is_file():
         tpl_names = _parse_volume_names(Path(template_path).read_bytes())
         if tpl_names:
@@ -962,6 +993,27 @@ def _scale_vol_flag_bucket_from_template(
     return out
 
 
+def _scale_entire_vol_flag_block(
+    template_path: str,
+    n_cells: int,
+) -> Optional[bytes]:
+    """Resample all template vol-flag pairs to *n_cells* (generic ex2/ex4-style)."""
+    loaded = _load_template_vol_flag_buckets(template_path)
+    if not loaded:
+        return None
+    buckets = loaded[1]
+    if not buckets:
+        return None
+    tpl_pairs = np.vstack([b for b in buckets if len(b)])
+    tpl_n = len(tpl_pairs)
+    if tpl_n == n_cells:
+        return tpl_pairs.astype(">i4").tobytes()
+    if tpl_n <= 0:
+        return None
+    scaled = _scale_vol_flag_bucket_from_template(tpl_pairs, n_cells, tpl_n, n_cells)
+    return scaled.astype(">i4").tobytes()
+
+
 def _generate_vol_flag_buckets(
     bucket_counts: list[int],
     template_path: Optional[str] = None,
@@ -1046,7 +1098,15 @@ def _build_volume_block2(
         )
         if body and len(body) // 8 == n_cells:
             return body
-        bucket_counts = [c for c in bucket_counts if c > 0]
+
+    if template_path and Path(template_path).is_file():
+        scaled = _scale_entire_vol_flag_block(template_path, n_cells)
+        if scaled and len(scaled) == n_cells * 8:
+            return scaled
+
+    bucket_counts = [c for c in half_counts if c > 0]
+    if ex3_buckets:
+        bucket_counts = bucket_counts[:5]
 
     flat: list[int] = []
     cur = 3
@@ -1059,9 +1119,14 @@ def _build_volume_block2(
     return np.asarray(flat, dtype=">i4").tobytes()
 
 
-def _volume_geometry_ex3_style(template_path: Optional[str]) -> bool:
-    """True when template uses ex3-style five-bucket volume metadata."""
+def _volume_geometry_ex3_style(
+    template_path: Optional[str],
+    case_stem: Optional[str] = None,
+) -> bool:
+    """True when template is ex3-family (count_val=10) and matches the SDAT case stem."""
     if not template_path or not Path(template_path).is_file():
+        return False
+    if case_stem and not Path(template_path).stem.startswith(case_stem):
         return False
     data = Path(template_path).read_bytes()
     sec = find_section(data, "LS_VolumeGeometryArray")
@@ -1106,10 +1171,11 @@ def _write_volume_geometry_array(
     template_path: Optional[str] = None,
     material: Optional[np.ndarray] = None,
     cell_part: Optional[np.ndarray] = None,
+    case_stem: Optional[str] = None,
 ) -> bytes:
     """Write LS_VolumeGeometryArray (names + per-cell vendor block)."""
     count_val, vol_names, block0_size, ex3 = _volume_export_layout(
-        volume_names, template_path,
+        volume_names, template_path, case_stem,
     )
     block0 = _build_volume_block0(vol_names, block0_size)
     block1 = _build_volume_block1(
@@ -1174,40 +1240,16 @@ def _surface_geometry_meta_count(template_path: Optional[str]) -> int:
     return 18
 
 
-def _build_surface_block4(
-    n_faces: int,
-    template_path: Optional[str],
-    meta_count: int,
-) -> bytes:
-    """Build surface block4; scale vendor template values to *n_faces* when counts differ."""
-    nbytes = 64 if meta_count == 16 else 72
-    zeros = b"\x00" * nbytes
-    if not template_path or not Path(template_path).is_file():
-        return zeros
-    data = Path(template_path).read_bytes()
-    sec = find_section(data, "LS_SurfaceGeometryArray")
-    if sec < 0:
-        return zeros
-    blocks = list(iter_data_blocks(data, sec, section_end(data, sec)))
-    if len(blocks) <= 4:
-        return zeros
-    p4, bc4 = blocks[4]
-    tpl = bytes(data[p4:p4 + bc4])
-    if len(tpl) != nbytes:
-        tpl = tpl[:nbytes].ljust(nbytes, b"\x00")
-    tpl_faces = blocks[5][1] // 16 if len(blocks) > 5 else 0
-    if tpl_faces <= 0 or tpl_faces == n_faces:
-        return tpl
-    scale = n_faces / tpl_faces
-    vals = np.frombuffer(tpl, dtype=">i4").astype(np.float64)
-    scaled = np.array([int(round(v * scale)) if v else 0 for v in vals], dtype=">i4")
-    return scaled.tobytes()
+def _build_surface_block4(meta: np.ndarray) -> bytes:
+    """Build surface block4: per-meta-slot byte sizes (face_count * 4) for arr5."""
+    return np.ascontiguousarray(meta * 4, dtype=">i4").tobytes()
 
 
 def _write_surface_geometry_array(
     surface_cats: dict,
     ymax_name: str = "Ymax",
     template_path: Optional[str] = None,
+    case_stem: Optional[str] = None,
 ) -> bytes:
     """Write LS_SurfaceGeometryArray for scPOST."""
     meta_count = _surface_geometry_meta_count(template_path)
@@ -1232,7 +1274,7 @@ def _write_surface_geometry_array(
 
     block0 = b"\x00" * 4608
     preamble = _mesh_geometry_preamble(meta_count, len(block0))
-    block4 = _build_surface_block4(n_faces, template_path, meta_count)
+    block4 = _build_surface_block4(meta)
     tpl_data: Optional[bytes] = None
     if template_path and Path(template_path).is_file():
         tpl_data = Path(template_path).read_bytes()
@@ -1265,7 +1307,7 @@ def _write_surface_geometry_array(
     inner += _mesh_geom_sep(face_bc)
     inner += _write_section_block(np.ascontiguousarray(arr5, dtype=">i4").tobytes())
 
-    if tpl_data is not None:
+    if tpl_data is not None and template_path:
         sec = find_section(tpl_data, "LS_SurfaceGeometryArray")
         if sec >= 0:
             tpl_blocks = list(iter_data_blocks(tpl_data, sec, section_end(tpl_data, sec)))
@@ -1297,6 +1339,7 @@ def write_fld_from_mesh(
     n_verts = vertices.shape[0]
     n_cells = cell_conn.shape[0]
     s_basename = _sdat_basename(s_text)
+    case_stem = Path(s_path).stem if s_path else s_basename
 
     header_tpl = resolve_header_template_fld(
         s_path=s_path,
@@ -1333,7 +1376,12 @@ def write_fld_from_mesh(
         )
 
     vol_geom_tpl = geom_tpl or layout_tpl
-    surf_geom_tpl = geom_tpl or layout_tpl
+    surf_geom_tpl = resolve_surface_geometry_fld(
+        s_path=s_path,
+        s_basename=s_basename,
+        mesh_file=mesh_file,
+        explicit=template_fld if template_fld and _surface_geometry_meta_count(template_fld) in (16, 18) else None,
+    ) or layout_tpl
 
     normalized = s_text.replace("\r\n", "\n").lstrip("\ufeff")
     if not normalized.startswith("SDAT"):
@@ -1447,10 +1495,13 @@ def write_fld_from_mesh(
     labels = " ".join(volume_names).encode("ascii")
     body += _write_volume_geometry_array(
         volume_names, n_cells, vol_geom_tpl, material=material, cell_part=cell_part,
+        case_stem=case_stem,
     )
 
     if surface_cats:
-        body += _write_surface_geometry_array(surface_cats, template_path=surf_geom_tpl)
+        body += _write_surface_geometry_array(
+            surface_cats, template_path=surf_geom_tpl, case_stem=case_stem,
+        )
 
     body += _write_sfile_section(normalized, sfile_tpl)
 

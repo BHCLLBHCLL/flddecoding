@@ -14,8 +14,43 @@ import numpy as np
 from surface_builder import build_vendor_surfaces, vendor_bc_plan_from_categories
 from s_model import SdatModel, build_structured_coords
 
-# MPI partition split along I (vendor layout for ex1/ex4).
-_I_SPLIT = 30
+# MPI partition split along I: first block size is ni - ni//2 (ex2 → 65, ex4 → 49).
+def _mpi_i_split(ni: int) -> int:
+    return ni - ni // 2
+
+
+def _uses_mpi_split_cell_order(ni: int, nk: int) -> bool:
+    """True for vendor two-block I ordering (ex2/ex3); ex4 uses full-width k-j-i rows."""
+    i1 = _mpi_i_split(ni)
+    return nk <= 43 or ni != 2 * i1
+
+
+def _iter_cells_vendor(ni: int, nj: int, nk: int):
+    """Yield (i, j, k) in vendor LS_Elements order."""
+    if _uses_mpi_split_cell_order(ni, nk):
+        i1 = _mpi_i_split(ni)
+        for k in range(nk):
+            for j in range(nj):
+                for i in range(i1):
+                    yield i, j, k
+        for k in range(nk):
+            for j in range(nj):
+                for i in range(i1, ni):
+                    yield i, j, k
+    else:
+        for k in range(nk):
+            for j in range(nj):
+                for i in range(ni):
+                    yield i, j, k
+
+
+def _flatten_cells_vendor(arr: np.ndarray, ni: int, nj: int, nk: int) -> np.ndarray:
+    """Flatten (ni, nj, nk) per-cell arrays in vendor LS_Elements order."""
+    return np.array(
+        [arr[i, j, k] for i, j, k in _iter_cells_vendor(ni, nj, nk)],
+        dtype=arr.dtype,
+    )
+
 
 _CORNER_OFFSETS = [
     (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
@@ -114,16 +149,17 @@ def _assign_node_ids(
     """Assign node ids with one vertex per material at multi-material interfaces."""
     node_ids: dict[tuple[int, int, int], list[int]] = {}
     mat_index: dict[tuple[int, int, int], dict[int, int]] = {}
+    i_split = _mpi_i_split(nx)
     next_id = 1
     for k in range(nz):
         for j in range(ny):
-            for i in range(_I_SPLIT):
+            for i in range(i_split):
                 mats = _materials_at_node(i, j, k, cmat)
                 ids = [next_id + j for j in range(len(mats))]
                 next_id += len(mats)
                 node_ids[(i, j, k)] = ids
                 mat_index[(i, j, k)] = {m: idx for idx, m in enumerate(mats)}
-            for i in range(_I_SPLIT, nx):
+            for i in range(i_split, nx):
                 mats = _materials_at_node(i, j, k, cmat)
                 ids = [next_id + j for j in range(len(mats))]
                 next_id += len(mats)
@@ -162,15 +198,13 @@ def _build_cell_conn(
     mat_index: dict[tuple[int, int, int], dict[int, int]],
 ) -> np.ndarray:
     rows: list[list[int]] = []
-    for k in range(nk):
-        for j in range(nj):
-            for i in range(ni):
-                m = int(cmat[i, j, k])
-                row = [
-                    _pick_node(i + oi, j + oj, k + ok, m, node_ids, mat_index)
-                    for oi, oj, ok in _CORNER_OFFSETS
-                ]
-                rows.append(row)
+    for i, j, k in _iter_cells_vendor(ni, nj, nk):
+        m = int(cmat[i, j, k])
+        row = [
+            _pick_node(i + oi, j + oj, k + ok, m, node_ids, mat_index)
+            for oi, oj, ok in _CORNER_OFFSETS
+        ]
+        rows.append(row)
     return np.array(rows, dtype=np.int64)
 
 
@@ -245,8 +279,8 @@ def build_mesh_from_sdat(
     node_ids, mat_index = _assign_node_ids(len(x), len(y), len(z), cmat)
     vertices = _build_vertices(x, y, z, node_ids)
     cell_conn = _build_cell_conn(ni, nj, nk, cmat, node_ids, mat_index)
-    material = cmat.reshape(-1)
-    cell_part = cpart.reshape(-1)
+    material = _flatten_cells_vendor(cmat, ni, nj, nk)
+    cell_part = _flatten_cells_vendor(cpart, ni, nj, nk)
     faces, bc_plan, surface_cats = _build_boundary_faces(
         ni, nj, nk, cmat, cpart, node_ids, mat_index, model.region_names, material,
     )
